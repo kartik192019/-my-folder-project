@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+
+{% block title %}Upload Job Description{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-md-8">
+        <div class="card">
+            <div class="card-header">
+                <h3>Upload Job Description</h3>
+            </div>
+            <div class="card-body">
+                <form method="post" enctype="multipart/form-data" action="{{ url_for('upload_job_description') }}">
+                    <div class="mb-3">
+                        <label for="title" class="form-label">Job Title</label>
+                        <input type="text" class="form-control" id="title" name="title" required>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="company_id" class="form-label">Company ID (Optional)</label>
+                        <input type="text" class="form-control" id="company_id" name="company_id" placeholder="UUID format">
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="user_id" class="form-label">User ID (Optional)</label>
+                        <input type="text" class="form-control" id="user_id" name="user_id" placeholder="UUID format">
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label class="form-label">Choose Input Method:</label>
+                        <div class="form-check">
+                            <input class="form-check-input" type="radio" name="input_method" id="file_input" value="file" checked>
+                            <label class="form-check-label" for="file_input">
+                                Upload File
+                            </label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input" type="radio" name="input_method" id="text_input" value="text">
+                            <label class="form-check-label" for="text_input">
+                                Paste Text
+                            </label>
+                        </div>
+                    </div>
+                    
+                    <div class="mb-3" id="file_upload_section">
+                        <label for="file" class="form-label">Upload Job Description File</label>
+                        <input type="file" class="form-control" id="file" name="file" accept=".txt,.pdf,.doc,.docx">
+                        <div class="form-text">Supported formats: TXT, PDF, DOC, DOCX</div>
+                    </div>
+                    
+                    <div class="mb-3" id="text_input_section" style="display: none;">
+                        <label for="job_description" class="form-label">Job Description Text</label>
+                        <textarea class="form-control" id="job_description" name="job_description" rows="10" placeholder="Paste your job description here..."></textarea>
+                    </div>
+                    
+                    <button type="submit" class="btn btn-primary">Upload and Analyze</button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const fileInput = document.getElementById('file_input');
+    const textInput = document.getElementById('text_input');
+    const fileSection = document.getElementById('file_upload_section');
+    const textSection = document.getElementById('text_input_section');
+    
+    function toggleInputMethod() {
+        if (fileInput.checked) {
+            fileSection.style.display = 'block';
+            textSection.style.display = 'none';
+        } else {
+            fileSection.style.display = 'none';
+            textSection.style.display = 'block';
+        }
+    }
+    
+    fileInput.addEventListener('change', toggleInputMethod);
+    textInput.addEventListener('change', toggleInputMethod);
+});
+</script>
+{% endblock %}

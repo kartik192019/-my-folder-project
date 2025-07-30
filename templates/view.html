@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+
+{% block title %}View Job Description{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <div class="card mb-4">
+            <div class="card-header">
+                <h3>{{ job_description.title or 'Untitled Job Description' }}</h3>
+                <small class="text-muted">ID: {{ job_description.jd_id }}</small>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-6">
+                        <p><strong>Created:</strong> {{ job_description.created_at.strftime('%Y-%m-%d %H:%M') }}</p>
+                        <p><strong>Company ID:</strong> {{ job_description.company_id or 'N/A' }}</p>
+                    </div>
+                    <div class="col-md-6">
+                        <p><strong>User ID:</strong> {{ job_description.user_id or 'N/A' }}</p>
+                        <p><strong>File:</strong> 
+                            {% if job_description.file_id %}
+                                <a href="{{ job_description.file_id }}" target="_blank">View File</a>
+                            {% elif job_description.jd_file %}
+                                {{ job_description.jd_file }}
+                            {% else %}
+                                Text Input
+                            {% endif %}
+                        </p>
+                    </div>
+                </div>
+                
+                <div class="mt-3">
+                    <h5>Job Description Content:</h5>
+                    <div class="border p-3 bg-light" style="max-height: 300px; overflow-y: auto;">
+                        <pre>{{ job_description.description }}</pre>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-header">
+                <h4>Analysis Results</h4>
+            </div>
+            <div class="card-body">
+                {% if resolved_data %}
+                <div class="row">
+                    {% for item in resolved_data %}
+                    {% if item.parameter is mapping %}
+                    <div class="col-12 mb-3">
+                        <div class="card">
+                            <div class="card-header">
+                                <h6 class="mb-0">Job Analysis Results</h6>
+                            </div>
+                            <div class="card-body">
+                                <div class="mb-2">
+                                    <small class="text-muted">Type: Complete Analysis</small>
+                                </div>
+                                <div style="max-height: 400px; overflow-y: auto;">
+                                    {% for category, details in item.parameter.items() %}
+                                    <div class="mb-3">
+                                        <h6 class="text-primary">{{ category }}</h6>
+                                        <div class="border-left pl-3" style="border-left: 3px solid #007bff; padding-left: 15px;">
+                                            <p class="mb-0">{{ details }}</p>
+                                        </div>
+                                    </div>
+                                    {% endfor %}
+                                </div>
+                                <small class="text-muted">Created: {{ item.created_at.strftime('%Y-%m-%d %H:%M') }}</small>
+                            </div>
+                        </div>
+                    </div>
+                    {% else %}
+                    <div class="col-12 mb-3">
+                        <div class="card">
+                            <div class="card-header">
+                                <h6 class="mb-0">{{ item.parameter.get('category', 'General') }}</h6>
+                            </div>
+                            <div class="card-body">
+                                <div class="mb-2">
+                                    <small class="text-muted">Type: {{ item.parameter_type or 'N/A' }}</small>
+                                </div>
+                                <pre class="mb-0" style="max-height: 200px; overflow-y: auto;">{{ item.value or item.parameter | tojson(indent=2) }}</pre>
+                                <small class="text-muted">Created: {{ item.created_at.strftime('%Y-%m-%d %H:%M') }}</small>
+                            </div>
+                        </div>
+                    </div>
+                    {% endif %}
+                    {% endfor %}
+                </div>
+                {% else %}
+                <p class="text-muted">No analysis data available yet.</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+
+{% block title %}Job Descriptions{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h3>Job Descriptions</h3>
+                <a href="{{ url_for('index') }}" class="btn btn-primary">Upload New</a>
+            </div>
+            <div class="card-body">
+                {% if job_descriptions %}
+                <div class="table-responsive">
+                    <table class="table table-striped">
+                        <thead>
+                            <tr>
+                                <th>Title</th>
+                                <th>JD ID</th>
+                                <th>Company ID</th>
+                                <th>File</th>
+                                <th>Created At</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for jd in job_descriptions %}
+                            <tr>
+                                <td>{{ jd.title or 'Untitled' }}</td>
+                                <td><small>{{ jd.jd_id }}</small></td>
+                                <td><small>{{ jd.company_id or 'N/A' }}</small></td>
+                                <td>
+                                    {% if jd.file_id %}
+                                        <a href="{{ jd.file_id }}" target="_blank" class="btn btn-sm btn-outline-secondary">View File</a>
+                                    {% elif jd.jd_file %}
+                                        <small>{{ jd.jd_file }}</small>
+                                    {% else %}
+                                        <small class="text-muted">Text Input</small>
+                                    {% endif %}
+                                </td>
+                                <td>{{ jd.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                                <td>
+                                    <a href="{{ url_for('view_job_description', jd_id=jd.jd_id) }}" class="btn btn-sm btn-outline-primary">View</a>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% else %}
+                <p class="text-muted">No job descriptions found. <a href="{{ url_for('index') }}">Upload your first one!</a></p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

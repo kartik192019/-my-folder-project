@@ -9,4 +9,5 @@ openpyxl==3.1.2
 Werkzeug==2.3.7
 psycopg2-binary==2.9.7
 chardet==5.2.0
-requests==2.31.0 
+requests==2.31.0
+aspose-words==23.12.0 

@@ -1,11 +1,11 @@
 {% extends "base.html" %}
-{% block title %}Job Descriptions{% endblock %}
+{% block title %}Job Descriptions - Resume Analysis{% endblock %}
 {% block content %}
 
 <div class="container-fluid">
     <div class="row">
         <div class="col-12">
-            <h2>Job Descriptions</h2>
+            <h2>Job Descriptions - Resume Analysis</h2>
             
             {% if job_descriptions %}
             <div class="table-responsive">
@@ -38,7 +38,8 @@
                             <td>{{ jd.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
                             <td>
                                 <div class="d-flex flex-column gap-1">
-                                    <a href="/job_description/{{ jd.jd_id }}" class="btn btn-sm btn-primary">View Details</a>
+                                    <a href="/job_description/{{ jd.jd_id }}" class="btn btn-sm btn-primary">View Analysis</a>
+                                    <a href="/job_description/{{ jd.jd_id }}/resumes" class="btn btn-sm btn-success">Analyze Resumes</a>
                                     <a href="/scoring/{{ jd.jd_id }}" class="btn btn-sm btn-warning">View Scoring Details</a>
                                 </div>
                             </td>
@@ -50,13 +51,14 @@
             {% else %}
             <div class="alert alert-info">
                 <h5>No Job Descriptions Found</h5>
-                <p>No job descriptions found. Upload your first one!</p>
+                <p>You need to upload job descriptions first before analyzing resumes.</p>
                 <a href="/upload" class="btn btn-primary">Upload Job Description</a>
             </div>
             {% endif %}
             
             <div class="mt-3">
-                <a href="/upload" class="btn btn-primary">Upload Job Description</a>
+                <a href="/upload" class="btn btn-primary">Upload Resumes</a>
+                <a href="/" class="btn btn-secondary">Back to Home</a>
             </div>
         </div>
     </div>

@@ -10,6 +10,7 @@ class Config:
     
     # Supabase Storage Configuration
     SUPABASE_STORAGE_BUCKET = 'job-descriptions'
+    SUPABASE_RESUME_BUCKET = 'resumes'  # Using the new resumes bucket
     SUPABASE_STORAGE_PUBLIC = True
     
     # AI Configuration - Use only one API key

@@ -10,6 +10,7 @@ from werkzeug.utils import secure_filename
 import PyPDF2
 import docx
 import chardet
+import aspose.words as aw
 from supabase import create_client, Client
 from config import Config
 
@@ -46,14 +47,83 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
+def convert_doc_to_docx(file_obj, filename):
+    """Convert .doc file to .docx format in memory"""
+    try:
+        # Reset file pointer to beginning
+        file_obj.seek(0)
+        
+        # Create a temporary file path for the input
+        import tempfile
+        import os
+        
+        # Create temporary files
+        with tempfile.NamedTemporaryFile(suffix='.doc', delete=False) as temp_doc:
+            temp_doc.write(file_obj.read())
+            temp_doc_path = temp_doc.name
+        
+        with tempfile.NamedTemporaryFile(suffix='.docx', delete=False) as temp_docx:
+            temp_docx_path = temp_docx.name
+        
+        try:
+            # Load the .doc document
+            doc = aw.Document(temp_doc_path)
+            
+            # Save the document as .docx
+            doc.save(temp_docx_path)
+            
+            # Read the converted .docx file
+            with open(temp_docx_path, 'rb') as converted_file:
+                converted_content = converted_file.read()
+            
+            return converted_content
+            
+        finally:
+            # Clean up temporary files
+            try:
+                os.unlink(temp_doc_path)
+                os.unlink(temp_docx_path)
+            except:
+                pass
+                
+    except Exception as e:
+        print(f"Error converting .doc to .docx: {e}")
+        raise Exception(f"Failed to convert .doc file: {str(e)}")
+
 def upload_to_supabase_storage(file, filename):
     """Upload file to Supabase storage and return the public URL"""
     try:
         print(f"Starting Supabase upload for {filename}")
         
-        # Read file content
-        file_content = file.read()
-        file.seek(0)  # Reset file pointer for later use
+        # Check if it's a .doc file and convert to .docx
+        file_extension = os.path.splitext(filename)[1].lower()
+        original_filename = filename
+        
+        if file_extension == '.doc':
+            print(f"Converting .doc file to .docx format...")
+            try:
+                # Convert .doc to .docx
+                converted_content = convert_doc_to_docx(file, filename)
+                
+                # Update filename to .docx
+                filename = os.path.splitext(filename)[0] + '.docx'
+                print(f"Converted {original_filename} to {filename}")
+                
+                # Use converted content for upload
+                file_content = converted_content
+                content_type = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+            except Exception as e:
+                print(f"Failed to convert .doc to .docx: {e}")
+                # Fallback to original file
+                file.seek(0)
+                file_content = file.read()
+                file.seek(0)
+                content_type = file.content_type
+        else:
+            # Read original file content
+            file_content = file.read()
+            file.seek(0)  # Reset file pointer for later use
+            content_type = file.content_type
         
         # Upload to Supabase storage
         bucket_name = Config.SUPABASE_STORAGE_BUCKET
@@ -65,7 +135,7 @@ def upload_to_supabase_storage(file, filename):
         result = supabase.storage.from_(bucket_name).upload(
             path=file_path,
             file=file_content,
-            file_options={"content-type": file.content_type}
+            file_options={"content-type": content_type}
         )
         
         print(f"Upload result: {result}")
@@ -82,11 +152,34 @@ def upload_to_supabase_storage(file, filename):
         print(f"Supabase upload error: {e}")
         # Fallback to local storage if Supabase fails
         print("Falling back to local storage...")
-        local_filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{filename}"
-        local_path = os.path.join(app.config['UPLOAD_FOLDER'], local_filename)
-        file.save(local_path)
-        print(f"Saved to local path: {local_path}")
-        return None, local_filename
+        
+        # Handle .doc conversion for local storage too
+        if file_extension == '.doc':
+            try:
+                converted_content = convert_doc_to_docx(file, filename)
+                local_filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{filename}"
+                local_path = os.path.join(app.config['UPLOAD_FOLDER'], local_filename)
+                
+                # Save converted content
+                with open(local_path, 'wb') as f:
+                    f.write(converted_content)
+                print(f"Saved converted .docx to local path: {local_path}")
+                return None, local_filename
+            except Exception as conv_e:
+                print(f"Failed to convert .doc for local storage: {conv_e}")
+                # Fallback to original file
+                file.seek(0)
+                local_filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{original_filename}"
+                local_path = os.path.join(app.config['UPLOAD_FOLDER'], local_filename)
+                file.save(local_path)
+                print(f"Saved original .doc to local path: {local_path}")
+                return None, local_filename
+        else:
+            local_filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{filename}"
+            local_path = os.path.join(app.config['UPLOAD_FOLDER'], local_filename)
+            file.save(local_path)
+            print(f"Saved to local path: {local_path}")
+            return None, local_filename
 
 def clean_text(text):
     """Clean text to remove null characters and problematic content"""
@@ -137,7 +230,7 @@ def extract_text_from_file_object(file_obj, file_extension):
                 print(f"Error reading PDF: {e}")
                 return f"Error: Could not read PDF file: {str(e)}"
         
-        elif file_extension.lower() in ['.docx', '.doc']:
+        elif file_extension.lower() == '.docx':
             try:
                 doc = docx.Document(file_obj)
                 text = ""
@@ -148,6 +241,27 @@ def extract_text_from_file_object(file_obj, file_extension):
             except Exception as e:
                 print(f"Error reading Word document: {e}")
                 return "Error: Could not read Word document. Please try saving as .txt or copy-paste the content."
+        
+        elif file_extension.lower() == '.doc':
+            try:
+                # Convert .doc to .docx first
+                print("Converting .doc file to .docx format...")
+                converted_content = convert_doc_to_docx(file_obj, "temp.doc")
+                
+                # Create a BytesIO object from the converted content
+                from io import BytesIO
+                docx_file_obj = BytesIO(converted_content)
+                
+                # Now read the converted .docx file
+                doc = docx.Document(docx_file_obj)
+                text = ""
+                for paragraph in doc.paragraphs:
+                    if paragraph.text.strip():
+                        text += paragraph.text + "\n"
+                return clean_text(text)
+            except Exception as e:
+                print(f"Error converting or reading .doc file: {e}")
+                return "Error: Could not convert or read .doc file. Please try saving as .docx or .txt format."
         
         elif file_extension.lower() == '.txt':
             # Reset file pointer and read content
@@ -204,7 +318,7 @@ def extract_text_from_file(file_path, file_extension):
                 print(f"Error reading PDF: {e}")
                 return f"Error: Could not read PDF file: {str(e)}"
         
-        elif file_extension.lower() in ['.docx', '.doc']:
+        elif file_extension.lower() == '.docx':
             try:
                 doc = docx.Document(file_path)
                 text = ""
@@ -215,6 +329,43 @@ def extract_text_from_file(file_path, file_extension):
             except Exception as e:
                 print(f"Error reading Word document: {e}")
                 return "Error: Could not read Word document. Please try saving as .txt or copy-paste the content."
+        
+        elif file_extension.lower() == '.doc':
+            try:
+                # Convert .doc to .docx first
+                print("Converting .doc file to .docx format...")
+                
+                # Load the .doc document
+                doc = aw.Document(file_path)
+                
+                # Create a temporary file for the converted .docx
+                import tempfile
+                with tempfile.NamedTemporaryFile(suffix='.docx', delete=False) as temp_docx:
+                    temp_docx_path = temp_docx.name
+                
+                try:
+                    # Save the document as .docx
+                    doc.save(temp_docx_path)
+                    
+                    # Now read the converted .docx file
+                    docx_doc = docx.Document(temp_docx_path)
+                    text = ""
+                    for paragraph in docx_doc.paragraphs:
+                        if paragraph.text.strip():
+                            text += paragraph.text + "\n"
+                    return clean_text(text)
+                    
+                finally:
+                    # Clean up temporary file
+                    try:
+                        import os
+                        os.unlink(temp_docx_path)
+                    except:
+                        pass
+                        
+            except Exception as e:
+                print(f"Error converting or reading .doc file: {e}")
+                return "Error: Could not convert or read .doc file. Please try saving as .docx or .txt format."
         
         elif file_extension.lower() == '.txt':
             # Detect encoding first
@@ -374,8 +525,8 @@ def upload_job_description():
             file_id = supabase_url if ('file' in request.files and request.files['file'].filename != '' and supabase_url) else None
             
             insert_query = """
-                INSERT INTO job_descriptions (company_id, user_id, title, description, jd_file, file_id)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                INSERT INTO job_descriptions (company_id, user_id, title, jd_file, file_id)
+                VALUES (%s, %s, %s, %s, %s)
                 RETURNING jd_id, jd_file, file_id
             """
             
@@ -402,7 +553,6 @@ def upload_job_description():
                 company_uuid,
                 user_uuid,
                 clean_text(title) if title else None,
-                job_description_text,  # Already cleaned
                 jd_file,
                 file_id
             ))
@@ -550,5 +700,5 @@ def test_text_cleaning():
     })
 
 if __name__ == '__main__':
-    print("Starting Frontend Application on http://127.0.0.1:5000")
-    app.run(debug=True, host='127.0.0.1', port=5000)
+    print("Starting JD Upload Application on http://127.0.0.1:5004")
+    app.run(debug=True, host='127.0.0.1', port=5004)

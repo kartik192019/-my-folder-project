@@ -1,0 +1,88 @@
+{% extends "base.html" %} 
+{% block title %}Job Description Analysis - Resume System{% endblock %} 
+{% block content %}
+
+<div class="container-fluid">
+    <div class="row">
+        <div class="col-12">
+            <h2>Job Description Analysis - Resume System</h2>
+            
+            <!-- Job Description Info -->
+            <div class="card mb-4">
+                <div class="card-header">
+                    <h5>Job Description Information</h5>
+                </div>
+                <div class="card-body">
+                    <table class="table table-bordered">
+                        <tr>
+                            <td><strong>Title:</strong></td>
+                            <td>{{ job_description.title or 'Untitled' }}</td>
+                        </tr>
+                        <tr>
+                            <td><strong>JD ID:</strong></td>
+                            <td>{{ job_description.jd_id }}</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Company ID:</strong></td>
+                            <td>{{ job_description.company_id or 'N/A' }}</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Created:</strong></td>
+                            <td>{{ job_description.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                        </tr>
+                        <tr>
+                            <td><strong>File:</strong></td>
+                            <td>
+                                {% if job_description.file_id %} 
+                                <a href="{{ job_description.file_id }}" target="_blank" class="btn btn-sm btn-info">View File</a>
+                                {% elif job_description.jd_file %} 
+                                {{ job_description.jd_file }} 
+                                {% else %} 
+                                Text Input 
+                                {% endif %}
+                            </td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Quick Actions -->
+            <div class="card mb-4">
+                <div class="card-header">
+                    <h5>Actions</h5>
+                </div>
+                <div class="card-body">
+                    <a href="/upload" class="btn btn-primary">Upload Resumes for Analysis</a>
+                    <a href="/scoring/{{ job_description.jd_id }}" class="btn btn-warning">View Scoring Details</a>
+                    <a href="/job_descriptions" class="btn btn-secondary">Back to Job Descriptions</a>
+                </div>
+            </div>
+
+            <!-- Analysis Results -->
+            <div class="card">
+                <div class="card-header">
+                    <h5>Job Description Analysis</h5>
+                </div>
+                <div class="card-body">
+                    {% if resolved_data %}
+                    {% for analysis in resolved_data %}
+                    <div class="mb-3">
+                        <div class="alert alert-light">
+                            <h6>Analysis Data:</h6>
+                            <pre class="bg-dark text-light p-3 rounded" style="max-height: 400px; overflow-y: auto;"><code>{{ analysis.parameter | tojson(indent=2) }}</code></pre>
+                        </div>
+                    </div>
+                    {% endfor %}
+                    {% else %}
+                    <div class="alert alert-warning">
+                        <h6>No Analysis Data Available</h6>
+                        <p>This job description hasn't been analyzed yet or no results are available.</p>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}

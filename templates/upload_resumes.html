@@ -1,0 +1,658 @@
+{% extends "base.html" %}
+
+{% block title %}Upload Resumes{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-md-10">
+        <div class="card">
+            <div class="card-header">
+                <h3>Upload Multiple Resumes</h3>
+                <p class="text-muted mb-0">Select a job description and upload multiple resumes for analysis</p>
+            </div>
+            <div class="card-body">
+                <form method="post" enctype="multipart/form-data" action="{{ url_for('upload_resumes') }}">
+                    <div class="mb-4">
+                        <label for="jd_id" class="form-label">Select Job Description *</label>
+                        <select class="form-select" id="jd_id" name="jd_id" required>
+                            <option value="">Choose a job description...</option>
+                            {% for jd in job_descriptions %}
+                            <option value="{{ jd.jd_id }}">
+                                {{ jd.title or 'Untitled' }} ({{ jd.created_at.strftime('%Y-%m-%d') }})
+                            </option>
+                            {% endfor %}
+                        </select>
+                        <div class="form-text">
+                            Select the job description against which you want to analyze the resumes
+                        </div>
+                    </div>
+                    
+                    <div class="mb-4">
+                        <label for="criteria_id" class="form-label">Select Criteria (Optional)</label>
+                        <select class="form-select" id="criteria_id" name="criteria_id">
+                            <option value="">Choose criteria (optional)...</option>
+                            {% for criteria in criteria_list %}
+                            <option value="{{ criteria.criteria_id }}">
+                                {{ criteria.criteria_name }} {% if criteria.weightage %}(Weight: {{ criteria.weightage }}){% endif %}
+                            </option>
+                            {% endfor %}
+                        </select>
+                        <div class="form-text">
+                            Select specific criteria to use for analysis (optional)
+                        </div>
+                    </div>
+                    
+                    <div class="mb-4">
+                        <label for="files" class="form-label">Upload Resumes *</label>
+                        <input type="file" class="form-control" id="files" name="files" multiple accept=".txt,.pdf,.doc,.docx" required>
+                        <div class="form-text">
+                            You can select multiple files. Supported formats: TXT, PDF, DOC, DOCX
+                        </div>
+                    </div>
+                    
+                    <div class="mb-4">
+                        <div class="alert alert-info">
+                            <h6><i class="fas fa-info-circle"></i> Note:</h6>
+                            <p class="mb-0">Previous analysis results for this job description will be automatically cleared before processing new uploads to avoid duplicates.</p>
+                        </div>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <div class="alert alert-info">
+                            <h6><i class="fas fa-info-circle"></i> How it works:</h6>
+                            <ul class="mb-0">
+                                <li>Select a job description from the dropdown above</li>
+                                <li>Optionally select specific criteria for analysis</li>
+                                <li>Upload multiple resume files (up to 15 files recommended)</li>
+                                <li>The system will analyze each resume against the selected job requirements and criteria</li>
+                                <li>Results will include personal information, educational qualifications, job history, and skills</li>
+                            </ul>
+                        </div>
+                    </div>
+                    
+                    <div class="d-grid gap-2">
+                        <button type="submit" class="btn btn-primary btn-lg">
+                            <i class="fas fa-upload"></i> Upload and Analyze Resumes
+                        </button>
+                        <a href="{{ url_for('list_job_descriptions') }}" class="btn btn-outline-secondary">
+                            <i class="fas fa-list"></i> View Job Descriptions
+                        </a>
+                    </div>
+                </form>
+            </div>
+        </div>
+        
+        <!-- Upload Progress Section -->
+        <div class="card mt-4" id="progress-card" style="display: none;">
+            <div class="card-header">
+                <h5>Upload Progress</h5>
+            </div>
+            <div class="card-body">
+                <div class="progress mb-3">
+                    <div class="progress-bar" role="progressbar" style="width: 0%" id="progress-bar"></div>
+                </div>
+                <div id="progress-text">Preparing upload...</div>
+                <div id="upload-details" class="mt-2"></div>
+            </div>
+        </div>
+        
+        <!-- Results Section -->
+        <div class="card mt-4" id="results-card" style="display: none;">
+            <div class="card-header">
+                <h5>Analysis Results</h5>
+            </div>
+            <div class="card-body">
+                <div id="results-content"></div>
+            </div>
+        </div>
+        
+        <!-- Test Modal Button -->
+        <div class="card mt-4">
+            <div class="card-header">
+                <h5>Debug Tools</h5>
+            </div>
+            <div class="card-body">
+                <button class="btn btn-warning" onclick="testModalFunction()">Test Modal Function</button>
+                <button class="btn btn-info" onclick="testScoringDetails('test.pdf', 'test-uuid')">Test Scoring Details</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const form = document.querySelector('form');
+    const progressCard = document.getElementById('progress-card');
+    const resultsCard = document.getElementById('results-card');
+    const progressBar = document.getElementById('progress-bar');
+    const progressText = document.getElementById('progress-text');
+    const uploadDetails = document.getElementById('upload-details');
+    const resultsContent = document.getElementById('results-content');
+    
+    form.addEventListener('submit', function(e) {
+        e.preventDefault();
+        
+        const formData = new FormData(form);
+        const files = document.getElementById('files').files;
+        const jdId = document.getElementById('jd_id').value;
+        const criteriaId = document.getElementById('criteria_id').value;
+        
+        if (!jdId) {
+            alert('Please select a job description');
+            return;
+        }
+        
+        if (files.length === 0) {
+            alert('Please select at least one resume file');
+            return;
+        }
+        
+        // Show progress
+        progressCard.style.display = 'block';
+        resultsCard.style.display = 'none';
+        progressBar.style.width = '0%';
+        progressText.textContent = 'Uploading files...';
+        uploadDetails.innerHTML = '';
+        
+        // Add files to form data
+        for (let i = 0; i < files.length; i++) {
+            formData.append('files', files[i]);
+        }
+        
+        // Submit form via AJAX
+        fetch(form.action, {
+            method: 'POST',
+            body: formData
+        })
+        .then(response => response.json())
+        .then(data => {
+            progressBar.style.width = '100%';
+            progressText.textContent = 'Analysis completed!';
+            
+            if (data.status === 'success') {
+                showResults(data);
+            } else {
+                showError(data.message || 'Upload failed');
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            showError('Upload failed: ' + error.message);
+        });
+    });
+    
+    function showResults(data) {
+        resultsCard.style.display = 'block';
+        
+        let html = `
+            <div class="alert alert-success">
+                <h6><i class="fas fa-check-circle"></i> Upload Successful!</h6>
+                <p>Successfully processed ${data.uploaded_count} resumes</p>
+                ${data.failed_count > 0 ? `<p class="text-warning">${data.failed_count} files failed to process</p>` : ''}
+                ${data.criteria_id ? `<p><strong>Criteria used:</strong> ${data.criteria_id}</p>` : ''}
+            </div>
+        `;
+        
+        console.log('Analysis result data:', data.analysis_result);
+        console.log('Results array:', data.analysis_result?.results);
+        console.log('Results length:', data.analysis_result?.results?.length);
+        console.log('Full data object:', data);
+        console.log('Data keys:', Object.keys(data));
+        console.log('Analysis result structure:', JSON.stringify(data.analysis_result, null, 2));
+        
+        if (data.analysis_result && data.analysis_result.results && data.analysis_result.results.length > 0) {
+            html += '<h6>Analysis Results:</h6>';
+            html += '<div class="table-responsive">';
+            html += '<table class="table table-striped">';
+            html += '<thead><tr><th>Resume</th><th>Status</th><th>Score</th><th>Status</th><th>Actions</th></tr></thead>';
+            html += '<tbody>';
+            
+            data.analysis_result.results.forEach(result => {
+                console.log('Processing result:', result);
+                console.log('Result keys:', Object.keys(result));
+                const analysis = result.analysis;
+                console.log('Analysis data:', analysis);
+                console.log('Analysis type:', analysis?.type);
+                
+                // Handle both new and legacy schema formats
+                let matchPercentage = 'N/A';
+                let overallScore = 'N/A';
+                let recommendation = 'N/A';
+                
+                if (analysis.type === 'object' && analysis.properties) {
+                    // New schema format - show basic info
+                    const personalInfo = analysis.properties;
+                    matchPercentage = 'Extracted';
+                    overallScore = 'Available';
+                    recommendation = 'View Details';
+                } else {
+                    // Legacy format
+                    matchPercentage = analysis.match_percentage ? `${analysis.match_percentage}%` : 'N/A';
+                    overallScore = analysis.overall_score ? `${analysis.overall_score}/100` : 'N/A';
+                    recommendation = analysis.recommendation || 'N/A';
+                }
+                
+                const matchClass = analysis.match_percentage >= 80 ? 'text-success' : 
+                                 analysis.match_percentage >= 60 ? 'text-warning' : 'text-info';
+                
+                html += `
+                    <tr>
+                        <td>${result.filename}</td>
+                        <td><span class="${matchClass} fw-bold">${matchPercentage}</span></td>
+                        <td>${overallScore}</td>
+                        <td><span class="badge bg-${getRecommendationColor(recommendation)}">${recommendation}</span></td>
+                        <td>
+                            <button class="btn btn-sm btn-outline-primary" onclick="showResumeDetails('${result.filename}', ${JSON.stringify(analysis).replace(/"/g, '&quot;')})">
+                                View Details
+                            </button>
+                        </td>
+                    </tr>
+                `;
+            });
+            
+            html += '</tbody></table></div>';
+        }
+        
+        // Display scoring results if available
+        console.log('Scoring results data:', data.scoring_results);
+        console.log('Scoring results type:', typeof data.scoring_results);
+        console.log('Scoring results length:', data.scoring_results ? data.scoring_results.length : 'undefined');
+        console.log('Scoring results keys:', data.scoring_results ? Object.keys(data.scoring_results) : 'undefined');
+        
+        if (data.scoring_results && data.scoring_results.length > 0) {
+            html += '<h6 class="mt-4">Criteria-Based Scoring Results:</h6>';
+            html += '<div class="table-responsive">';
+            html += '<table class="table table-striped">';
+            html += '<thead><tr><th>Resume</th><th>Final Score</th><th>Recommendation</th><th>Actions</th></tr></thead>';
+            html += '<tbody>';
+            
+            data.scoring_results.forEach((result, index) => {
+                console.log(`Processing scoring result ${index}:`, result);
+                console.log(`Result keys:`, Object.keys(result));
+                
+                if (result.error) {
+                    console.log(`Scoring result ${index} has error:`, result.error);
+                    html += `
+                        <tr>
+                            <td>${result.filename}</td>
+                            <td colspan="2"><span class="text-danger">Error: ${result.error}</span></td>
+                            <td>-</td>
+                        </tr>
+                    `;
+                } else {
+                    const scoreClass = result.final_score >= 8 ? 'text-success' : 
+                                     result.final_score >= 6 ? 'text-warning' : 'text-info';
+                    
+                    console.log('Creating scoring result row:', result);
+                    console.log('Score ID exists:', !!result.score_id);
+                    console.log('Score ID value:', result.score_id);
+                    console.log('Final score:', result.final_score);
+                    console.log('Recommendation:', result.recommendation);
+                    
+                    html += `
+                        <tr>
+                            <td>${result.filename}</td>
+                            <td><span class="${scoreClass} fw-bold">${result.final_score}</span></td>
+                            <td><span class="badge bg-${getRecommendationColor(result.recommendation)}">${result.recommendation}</span></td>
+                            <td>
+                                <button class="btn btn-sm btn-outline-primary" onclick="showScoringDetails('${result.filename}', '${result.score_id || ''}')">
+                                    View Details
+                                </button>
+                            </td>
+                        </tr>
+                    `;
+                }
+            });
+            
+            html += '</tbody></table></div>';
+        } else {
+            console.log('No scoring results available or empty array');
+            console.log('Full data object for debugging:', JSON.stringify(data, null, 2));
+        }
+        
+        resultsContent.innerHTML = html;
+    }
+    
+    function showError(message) {
+        resultsCard.style.display = 'block';
+        resultsContent.innerHTML = `
+            <div class="alert alert-danger">
+                <h6><i class="fas fa-exclamation-triangle"></i> Upload Failed</h6>
+                <p>${message}</p>
+            </div>
+        `;
+    }
+    
+    function getRecommendationColor(recommendation) {
+    switch(recommendation) {
+        case 'Strongly Recommend': return 'success';
+        case 'Recommend': return 'primary';
+        case 'Consider': return 'warning';
+        case 'Not Recommended': return 'danger';
+        case 'View Details': return 'info';
+        case 'Available': return 'success';
+        case 'Extracted': return 'primary';
+        case 'To be interviewed': return 'success';
+        case 'Candidature rejected': return 'danger';
+        case 'Review further': return 'warning';
+        default: return 'secondary';
+    }
+}
+
+
+});
+
+function showResumeDetails(filename, analysis) {
+    // Handle both new and legacy schema formats
+    let modalContent = '';
+    
+    if (analysis.type === 'object' && analysis.properties) {
+        // New schema format
+        const personalInfo = analysis.properties;
+        const education = analysis.educational_qualification || 'Not specified';
+        const jobHistory = analysis.job_history || 'Not specified';
+        const skills = analysis.skills || 'Not specified';
+        
+        modalContent = `
+            <div class="modal fade" id="resumeModal" tabindex="-1">
+                <div class="modal-dialog modal-lg">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h5 class="modal-title">Resume Analysis: ${filename}</h5>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                        </div>
+                        <div class="modal-body">
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <h6>Personal Information</h6>
+                                    <ul class="list-unstyled">
+                                        <li><strong>Name:</strong> ${personalInfo.name || 'Not specified'}</li>
+                                        <li><strong>Email:</strong> ${personalInfo.email || 'Not specified'}</li>
+                                        <li><strong>Telephone:</strong> ${personalInfo.telephone || 'Not specified'}</li>
+                                        <li><strong>City:</strong> ${personalInfo.city || 'Not specified'}</li>
+                                        <li><strong>Birthdate:</strong> ${personalInfo.birthdate || 'Not specified'}</li>
+                                        <li><strong>Age:</strong> ${personalInfo.age || 'Not specified'}</li>
+                                        <li><strong>Gender:</strong> ${personalInfo.gender || 'Not specified'}</li>
+                                    </ul>
+                                </div>
+                                <div class="col-md-6">
+                                    <h6>Educational Qualification</h6>
+                                    <p style="white-space: pre-line;">${education}</p>
+                                </div>
+                            </div>
+                            
+                            <div class="row mt-3">
+                                <div class="col-md-6">
+                                    <h6>Job History</h6>
+                                    <p style="white-space: pre-line;">${jobHistory}</p>
+                                </div>
+                                <div class="col-md-6">
+                                    <h6>Skills</h6>
+                                    <p style="white-space: pre-line;">${skills}</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+    } else {
+        // Legacy format for backward compatibility
+        const strengths = Array.isArray(analysis.strengths) ? analysis.strengths.join(', ') : analysis.strengths;
+        const weaknesses = Array.isArray(analysis.weaknesses) ? analysis.weaknesses.join(', ') : analysis.weaknesses;
+        const missingSkills = Array.isArray(analysis.key_missing_skills) ? analysis.key_missing_skills.join(', ') : analysis.key_missing_skills;
+        const matchingSkills = Array.isArray(analysis.key_matching_skills) ? analysis.key_matching_skills.join(', ') : analysis.key_matching_skills;
+        
+        modalContent = `
+            <div class="modal fade" id="resumeModal" tabindex="-1">
+                <div class="modal-dialog modal-lg">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h5 class="modal-title">Resume Analysis: ${filename}</h5>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                        </div>
+                        <div class="modal-body">
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <h6>Overall Assessment</h6>
+                                    <ul class="list-unstyled">
+                                        <li><strong>Match Percentage:</strong> ${analysis.match_percentage}%</li>
+                                        <li><strong>Overall Score:</strong> ${analysis.overall_score}/100</li>
+                                        <li><strong>Recommendation:</strong> <span class="badge bg-${getRecommendationColor(analysis.recommendation)}">${analysis.recommendation}</span></li>
+                                        <li><strong>Years Experience:</strong> ${analysis.years_experience}</li>
+                                        <li><strong>Current Role:</strong> ${analysis.current_role}</li>
+                                    </ul>
+                                </div>
+                                <div class="col-md-6">
+                                    <h6>Skills Analysis</h6>
+                                    <ul class="list-unstyled">
+                                        <li><strong>Matching Skills:</strong> ${matchingSkills}</li>
+                                        <li><strong>Missing Skills:</strong> ${missingSkills}</li>
+                                    </ul>
+                                </div>
+                            </div>
+                            
+                            <div class="row mt-3">
+                                <div class="col-md-6">
+                                    <h6>Strengths</h6>
+                                    <p class="text-success">${strengths}</p>
+                                </div>
+                                <div class="col-md-6">
+                                    <h6>Areas for Improvement</h6>
+                                    <p class="text-warning">${weaknesses}</p>
+                                </div>
+                            </div>
+                            
+                            <div class="row mt-3">
+                                <div class="col-12">
+                                    <h6>Detailed Analysis</h6>
+                                    <ul>
+                                        <li><strong>Experience Match:</strong> ${analysis.experience_match}</li>
+                                        <li><strong>Skills Match:</strong> ${analysis.skills_match}</li>
+                                        <li><strong>Education Match:</strong> ${analysis.education_match}</li>
+                                    </ul>
+                                </div>
+                            </div>
+                            
+                            <div class="row mt-3">
+                                <div class="col-12">
+                                    <h6>Summary</h6>
+                                    <p>${analysis.summary}</p>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+    
+    const modal = modalContent;
+    
+    // Remove existing modal if any
+    const existingModal = document.getElementById('resumeModal');
+    if (existingModal) {
+        existingModal.remove();
+    }
+    
+    // Add new modal to body
+    document.body.insertAdjacentHTML('beforeend', modal);
+    
+    // Show modal
+    const modalElement = document.getElementById('resumeModal');
+    const bootstrapModal = new bootstrap.Modal(modalElement);
+    bootstrapModal.show();
+}
+
+function getRecommendationColor(recommendation) {
+    switch(recommendation) {
+        case 'Strongly Recommend': return 'success';
+        case 'Recommend': return 'primary';
+        case 'Consider': return 'warning';
+        case 'Not Recommended': return 'danger';
+        default: return 'secondary';
+    }
+}
+
+function showScoringDetails(filename, scoreId) {
+    console.log('Showing scoring details for:', filename, 'Score ID:', scoreId);
+    
+    if (!scoreId || scoreId === '') {
+        alert('No scoring details available for this resume.');
+        return;
+    }
+    
+    // Create modal for scoring details
+    const modal = `
+        <div class="modal fade" id="scoringModal" tabindex="-1">
+            <div class="modal-dialog modal-lg">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">Scoring Details: ${filename}</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="text-center">
+                            <div class="spinner-border" role="status">
+                                <span class="visually-hidden">Loading...</span>
+                            </div>
+                            <p class="mt-2">Loading scoring details...</p>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+    
+    // Remove existing modal if any
+    const existingModal = document.getElementById('scoringModal');
+    if (existingModal) {
+        existingModal.remove();
+    }
+    
+    // Add modal to body
+    document.body.insertAdjacentHTML('beforeend', modal);
+    
+    // Show modal
+    const modalElement = document.getElementById('scoringModal');
+    const bootstrapModal = new bootstrap.Modal(modalElement);
+    bootstrapModal.show();
+    
+    // Fetch scoring details from server
+    fetch(`/scoring_details/${scoreId}`)
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                // Update modal content with scoring details
+                const modalBody = modalElement.querySelector('.modal-body');
+                modalBody.innerHTML = `
+                    <div class="row">
+                        <div class="col-md-6">
+                            <h6>Final Score</h6>
+                            <p class="h4 text-primary">${data.score.final_score}/10</p>
+                        </div>
+                        <div class="col-md-6">
+                            <h6>Recommendation</h6>
+                            <span class="badge bg-${getRecommendationColor(data.score.recommendation)}">${data.score.recommendation}</span>
+                        </div>
+                    </div>
+                    <div class="row mt-3">
+                        <div class="col-12">
+                            <h6>Detailed Scoring</h6>
+                            <div class="table-responsive">
+                                <table class="table table-sm">
+                                    <thead>
+                                        <tr>
+                                            <th>Criteria</th>
+                                            <th>Score</th>
+                                            <th>Weight</th>
+                                            <th>Weighted Score</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        ${data.details.map(detail => `
+                                            <tr>
+                                                <td>${detail.criteria_name}</td>
+                                                <td>${detail.score}/10</td>
+                                                <td>${detail.weightage}%</td>
+                                                <td>${(detail.score * detail.weightage / 100).toFixed(2)}</td>
+                                            </tr>
+                                        `).join('')}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            } else {
+                modalElement.querySelector('.modal-body').innerHTML = `
+                    <div class="alert alert-warning">
+                        <p>No detailed scoring information available for this resume.</p>
+                    </div>
+                `;
+            }
+        })
+        .catch(error => {
+            console.error('Error fetching scoring details:', error);
+            modalElement.querySelector('.modal-body').innerHTML = `
+                <div class="alert alert-danger">
+                    <p>Error loading scoring details. Please try again.</p>
+                </div>
+            `;
+        });
+}
+
+function testScoringDetails(filename, scoreId) {
+    console.log('Testing scoring details for:', filename, 'Score ID:', scoreId);
+    showScoringDetails(filename, scoreId);
+}
+
+function testModalFunction() {
+    console.log('Testing modal function...');
+    alert('Modal function is working!');
+    
+    // Test basic modal
+    const modal = `
+        <div class="modal fade" id="testModal" tabindex="-1">
+            <div class="modal-dialog">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">Test Modal</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                    </div>
+                    <div class="modal-body">
+                        <p>This is a test modal to verify Bootstrap is working.</p>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+    
+    // Remove existing modal if any
+    const existingModal = document.getElementById('testModal');
+    if (existingModal) {
+        existingModal.remove();
+    }
+    
+    // Add modal to body
+    document.body.insertAdjacentHTML('beforeend', modal);
+    
+    // Show modal
+    const modalElement = document.getElementById('testModal');
+    const bootstrapModal = new bootstrap.Modal(modalElement);
+    bootstrapModal.show();
+}
+</script>
+{% endblock %} 

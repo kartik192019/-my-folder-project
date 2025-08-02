@@ -1,14 +1,37 @@
-# Resume Screener - AI-Powered Job Description Analyzer
+# Resume Screener - AI-Powered Job Description & Resume Analyzer
 
-This application analyzes job descriptions from PDF files and other formats using AI to extract key information like requirements, skills, and qualifications.
+This application analyzes job descriptions and resumes using AI to extract key information like requirements, skills, and qualifications. It supports both job description analysis and resume screening against job requirements.
 
 ## Features
 
+### Job Description Analysis
 - **PDF Analysis**: Upload and analyze PDF job descriptions
 - **AI-Powered Extraction**: Uses Gemini AI or OpenAI to extract structured information
 - **Multiple File Formats**: Supports PDF, DOCX, DOC, and TXT files
 - **Real Analysis**: No mock responses - actual AI analysis of uploaded content
 - **Structured Output**: Extracts personal info, technical skills, experience requirements, and more
+
+### Resume Screening
+- **Multiple Resume Upload**: Upload up to 15 resumes at once
+- **JD Selection**: Choose from existing job descriptions via dropdown
+- **Criteria-Based Scoring**: Select scoring criteria for detailed evaluation
+- **AI-Powered Analysis**: Each resume is analyzed against job requirements
+- **Comprehensive Results**: Extract personal information, educational qualifications, job history, and skills
+- **Modern UI**: Beautiful interface with progress tracking and detailed results
+
+### Criteria Management
+- **Create Criteria**: Define custom scoring criteria with parameters and weightage
+- **Criteria Grid**: Set up detailed evaluation grids for different job types
+- **Bulk Operations**: Create multiple criteria at once
+- **Validation**: Built-in validation for criteria data
+- **Statistics**: Get insights about criteria usage and performance
+
+### Scoring System
+- **Criteria-Based Scoring**: Score resumes against specific criteria
+- **Parameter Scoring**: Individual parameter evaluation with weightage
+- **Final Recommendations**: Get interview recommendations based on scores
+- **Score Statistics**: View scoring statistics and trends
+- **Detailed Assessment**: Comprehensive evaluation reports
 
 ## Prerequisites
 
@@ -37,7 +60,7 @@ This application analyzes job descriptions from PDF files and other formats usin
 
 ## Running the Application
 
-### Option 1: Run Both Services (Recommended)
+### Option 1: Job Description Analysis Only
 
 1. **Start the AI Analyzer Backend** (Terminal 1):
    ```bash
@@ -51,14 +74,77 @@ This application analyzes job descriptions from PDF files and other formats usin
    ```
    This starts the web interface on http://localhost:5000
 
-### Option 2: Test the AI Analyzer
+### Option 2: Resume Screening System (Recommended)
+
+1. **Start the CV Analyzer Backend** (Terminal 1):
+   ```bash
+   python cv_analyzer.py
+   ```
+   This starts the resume analysis service on http://localhost:5002
+   - Includes criteria management endpoints
+   - Includes scoring system endpoints
+   - Handles resume analysis and scoring
+
+2. **Start the Resume Upload App** (Terminal 2):
+   ```bash
+   python app2.py
+   ```
+   This starts the resume upload interface on http://localhost:5003
+
+### Option 3: Full System (All Services)
+
+Run all services for complete functionality:
+```bash
+# Terminal 1: AI Analyzer (for job descriptions)
+python ai_analyzer.py
+
+# Terminal 2: Main App (for job descriptions)
+python app.py
+
+# Terminal 3: CV Analyzer (for resumes, criteria, and scoring)
+python cv_analyzer.py
+
+# Terminal 4: Resume App (for resumes)
+python app2.py
+```
+
+### Option 4: Test the System
 
 Run the test script to verify the AI analyzer is working:
 ```bash
 python test_ai_analyzer.py
 ```
 
+## API Endpoints
+
+### CV Analyzer (Port 5002) - Integrated Services
+
+#### Resume Analysis
+- `POST /analyze_resumes` - Analyze multiple resumes
+- `POST /calculate_resume_score` - Calculate resume scores
+- `GET /scoring_details/<score_id>` - Get scoring details
+
+#### Criteria Management
+- `POST /criteria` - Create new criteria
+- `GET /criteria/<criteria_id>` - Get specific criteria
+- `PUT /criteria/<criteria_id>` - Update criteria
+- `DELETE /criteria/<criteria_id>` - Delete criteria
+- `GET /criteria` - List all criteria
+- `GET /criteria/stats` - Get criteria statistics
+- `POST /criteria/bulk` - Create multiple criteria
+- `POST /criteria/validate` - Validate criteria data
+
+#### Scoring System
+- `GET /scoring/scores` - Get resume scores
+- `GET /scoring/stats` - Get scoring statistics
+
+#### Health & Info
+- `GET /health` - Health check
+- `GET /` - Service information and endpoints
+
 ## Usage
+
+### Job Description Analysis
 
 1. **Open your browser** and go to http://localhost:5000
 
@@ -77,6 +163,27 @@ python test_ai_analyzer.py
      - Educational qualifications
      - Soft skills
 
+### Resume Screening
+
+1. **Open your browser** and go to http://localhost:5003
+
+2. **Select a job description**:
+   - Choose from the dropdown of existing job descriptions
+   - The system will use the analyzed requirements for comparison
+
+3. **Upload multiple resumes**:
+   - Select up to 15 resume files (PDF, DOCX, DOC, TXT)
+   - Click "Upload and Analyze Resumes"
+
+4. **View screening results**:
+   - Match percentage for each resume
+   - Personal information extraction (name, email, phone, city, birthdate, age, gender)
+- Educational qualifications analysis
+- Job history extraction
+- Skills categorization (technical, functional, soft skills)
+   - Skills matching and missing skills
+   - Overall recommendation (Strongly Recommend/Recommend/Consider/Not Recommended)
+
 ## API Endpoints
 
 ### AI Analyzer Backend (Port 5001)
@@ -91,6 +198,18 @@ python test_ai_analyzer.py
 - `POST /upload` - Upload and analyze job description
 - `GET /job_descriptions` - List all job descriptions
 - `GET /job_description/<id>` - View specific job description
+
+### CV Analyzer Backend (Port 5002)
+
+- `GET /health` - Health check
+- `POST /analyze_resumes` - Analyze multiple resumes against job description
+- `GET /` - Home endpoint
+
+### Resume Upload App (Port 5003)
+
+- `GET /` - Resume upload form
+- `POST /upload_resumes` - Upload and analyze resumes
+- `GET /job_descriptions` - List job descriptions for selection
 
 ## Troubleshooting
 
@@ -147,11 +266,55 @@ DB_USER = 'your-database-user'
 DB_PASSWORD = 'your-database-password'
 ```
 
+### Database Tables
+
+The system uses these tables:
+
+- `job_descriptions` - Stores uploaded job descriptions
+- `resolved_jd` - Stores analyzed job requirements
+- `resume_analyses` - Stores resume analysis results
+
+**Note**: The `resume_analyses` table should be created in your Supabase database using the SQL editor with this schema:
+
+```sql
+CREATE TABLE IF NOT EXISTS resume_analyses (
+  analysis_id uuid not null default gen_random_uuid (),
+  jd_id uuid not null,
+  resume_filename text not null,
+  resume_url text null,
+  analysis_data jsonb not null,
+  created_at timestamp with time zone not null default now(),
+  updated_at timestamp with time zone not null default now(),
+  status character varying(50) null default 'active'::character varying,
+  constraint resume_analyses_pkey primary key (analysis_id)
+);
+```
+
 ## File Format Support
 
 - **PDF**: Text extraction using PyPDF2
 - **DOCX/DOC**: Text extraction using python-docx
 - **TXT**: Direct text processing with encoding detection
+
+## System Architecture
+
+```
+resume_screener/
+├── app.py                 # Job description upload frontend (Port 5000)
+├── ai_analyzer.py         # Job description analysis backend (Port 5001)
+├── app2.py               # Resume upload frontend (Port 5003)
+├── cv_analyzer.py        # Resume analysis backend (Port 5002)
+├── config.py             # Configuration settings
+
+├── templates/
+│   ├── upload.html       # Job description upload UI
+│   ├── list.html         # Job description list
+│   ├── view.html         # Job description view
+│   ├── upload_resumes.html    # Resume upload UI
+│   ├── list_resumes.html      # JD list for resumes
+│   └── view_resumes.html      # JD view for resumes
+└── uploads/              # Local file storage
+```
 
 ## AI Providers
 

@@ -12,6 +12,7 @@ import PyPDF2
 import docx
 import chardet
 import aspose.words as aw
+import tiktoken
 from supabase import create_client, Client
 from config import Config
 
@@ -43,8 +44,34 @@ CV_ANALYZER_URL = 'http://localhost:5002/analyze_resumes'
 UPLOAD_FOLDER = 'uploads'
 ALLOWED_EXTENSIONS = {'txt', 'pdf', 'doc', 'docx'}
 
+# Token counter functions
+def count_tokens(text: str, model: str = "gpt-3.5-turbo") -> int:
+    """Count the number of tokens in a text string using tiktoken."""
+    try:
+        encoding = tiktoken.encoding_for_model(model)
+    except KeyError:
+        encoding = tiktoken.get_encoding("cl100k_base")
+    return len(encoding.encode(text))
+
+def validate_token_limit(text: str, max_tokens: int, model: str = "gpt-3.5-turbo") -> bool:
+    """Check if the text exceeds the maximum token limit."""
+    return count_tokens(text, model) <= max_tokens
+
+def truncate_to_token_limit(text: str, max_tokens: int, model: str = "gpt-3.5-turbo") -> str:
+    """Truncate text to stay within the specified token limit."""
+    try:
+        encoding = tiktoken.encoding_for_model(model)
+    except KeyError:
+        encoding = tiktoken.get_encoding("cl100k_base")
+    
+    tokens = encoding.encode(text)
+    if len(tokens) <= max_tokens:
+        return text
+    return encoding.decode(tokens[:max_tokens])
+
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
+app.config['MAX_TOKENS'] = 400000  # Default max tokens for analysis
 
 # Create upload folder if it doesn't exist
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -372,22 +399,32 @@ def upload_resumes():
                 
                 # Upload to Supabase storage
                 print(f"Uploading resume: {filename}")
+                
+                # Read file content for token counting
+                file_content = file.read().decode('utf-8', errors='replace')
+                token_count = count_tokens(file_content)
+                
+                # Reset file pointer after reading
+                file.seek(0)
+                
                 supabase_url, file_path = upload_to_supabase_storage(file, filename)
                 
                 if supabase_url:
                     uploaded_files.append({
                         'filename': filename,
                         'url': supabase_url,
-                        'path': file_path
+                        'path': file_path,
+                        'token_count': token_count
                     })
-                    print(f"Successfully uploaded to Supabase: {filename}")
+                    print(f"Successfully uploaded to Supabase: {filename} (Tokens: {token_count})")
                 else:
                     uploaded_files.append({
                         'filename': filename,
                         'url': None,
-                        'path': file_path
+                        'path': file_path,
+                        'token_count': token_count
                     })
-                    print(f"Saved to local storage: {filename}")
+                    print(f"Saved to local storage: {filename} (Tokens: {token_count})")
                 
             except Exception as e:
                 print(f"Failed to upload {file.filename}: {e}")
@@ -523,6 +560,17 @@ def upload_resumes():
                 print(f"📊 Result keys: {result.keys() if isinstance(result, dict) else 'Not a dict'}")
                 print(f"📊 Result.get('results'): {result.get('results', [])}")
                 
+                # Prepare token info for each uploaded resume
+                resume_token_info = [
+                    {
+                        'filename': file_info['filename'],
+                        'token_count': file_info['token_count'],
+                        'is_over_limit': file_info['token_count'] > app.config['MAX_TOKENS'],
+                        'is_near_limit': file_info['token_count'] > (app.config['MAX_TOKENS'] * 0.85)
+                    }
+                    for file_info in uploaded_files
+                ]
+                
                 response_data = {
                     'status': 'success',
                     'message': f'Successfully processed {len(uploaded_files)} new resumes',
@@ -532,7 +580,8 @@ def upload_resumes():
                     'failed_count': len(failed_files),
                     'analysis_result': {'results': result.get('results', [])},
                     'records_created': records_created,
-                    'scoring_results': scoring_results
+                    'scoring_results': scoring_results,
+                    'resume_token_info': resume_token_info
                 }
                 
                 print(f"📊 Response data being sent to frontend:")
@@ -626,10 +675,27 @@ def view_job_description(jd_id):
         
         resolved_data = cur.fetchall()
         
+        # Calculate token information for the job description
+        jd_text = jd.get('text_content', '') or jd.get('description', '')
+        token_count = count_tokens(jd_text)
+        max_tokens = app.config.get('MAX_TOKENS', 4000)
+        token_percentage = min(round((token_count / max_tokens) * 100), 100)  # Cap at 100%
+        
+        token_info = {
+            'count': token_count,
+            'max': max_tokens,
+            'percentage': token_percentage,
+            'is_over_limit': token_count > max_tokens,
+            'is_near_limit': token_count > (max_tokens * 0.85)  # 85% of max
+        }
+        
         cur.close()
         conn.close()
         
-        return render_template('view_resumes.html', job_description=jd, resolved_data=resolved_data)
+        return render_template('view_resumes.html', 
+                            job_description=jd, 
+                            resolved_data=resolved_data,
+                            token_info=token_info)
     except Exception as e:
         flash(f'Error fetching job description: {str(e)}')
         return redirect(url_for('list_job_descriptions'))
@@ -710,7 +776,8 @@ def view_scoring_details(jd_id):
             SELECT 
                 rs.score_id, rs.analysis_id, rs.resume_filename, 
                 rs.final_score, rs.recommendation, rs.consideration,
-                rs.parameter_scores, rs.created_at,
+                rs.parameter_scores, rs.created_at, rs.token_count,
+                rs.cumulative_token_count, rs.upload_count,
                 c.criteria_name,
                 ra.analysis_data
             FROM resume_scores rs
@@ -766,7 +833,8 @@ def get_scoring_details(score_id):
             SELECT 
                 rs.score_id, rs.analysis_id, rs.resume_filename, 
                 rs.final_score, rs.recommendation, rs.consideration,
-                rs.parameter_scores, rs.created_at,
+                rs.parameter_scores, rs.created_at, rs.token_count,
+                rs.cumulative_token_count, rs.upload_count,
                 c.criteria_name, c.weightage
             FROM resume_scores rs
             LEFT JOIN criteria c ON rs.criteria_id = c.criteria_id
@@ -807,7 +875,10 @@ def get_scoring_details(score_id):
                 'final_score': score_result['final_score'],
                 'recommendation': score_result['recommendation'],
                 'consideration': score_result['consideration'],
-                'created_at': score_result['created_at'].isoformat() if score_result['created_at'] else None
+                'created_at': score_result['created_at'].isoformat() if score_result['created_at'] else None,
+                'token_count': score_result.get('token_count'),
+                'cumulative_token_count': score_result.get('cumulative_token_count'),
+                'upload_count': score_result.get('upload_count')
             },
             'details': details
         }

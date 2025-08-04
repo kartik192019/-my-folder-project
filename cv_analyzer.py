@@ -7,6 +7,7 @@ from datetime import datetime
 import os
 import logging
 import requests
+import tiktoken
 from config import Config
 
 # Configure logging
@@ -15,8 +16,34 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+# Token counter functions
+def count_tokens(text: str, model: str = "gpt-3.5-turbo") -> int:
+    """Count the number of tokens in a text string using tiktoken."""
+    try:
+        encoding = tiktoken.encoding_for_model(model)
+    except KeyError:
+        encoding = tiktoken.get_encoding("cl100k_base")
+    return len(encoding.encode(text))
+
+def validate_token_limit(text: str, max_tokens: int, model: str = "gpt-3.5-turbo") -> bool:
+    """Check if the text exceeds the maximum token limit."""
+    return count_tokens(text, model) <= max_tokens
+
+def truncate_to_token_limit(text: str, max_tokens: int, model: str = "gpt-3.5-turbo") -> str:
+    """Truncate text to stay within the specified token limit."""
+    try:
+        encoding = tiktoken.encoding_for_model(model)
+    except KeyError:
+        encoding = tiktoken.get_encoding("cl100k_base")
+    
+    tokens = encoding.encode(text)
+    if len(tokens) <= max_tokens:
+        return text
+    return encoding.decode(tokens[:max_tokens])
+
 # Database configuration
 DB_CONFIG = Config.get_db_config()
+MAX_TOKENS = 400000  # Default max tokens for analysis
 
 # AI Service configuration
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', Config.OPENAI_API_KEY)
@@ -1223,7 +1250,7 @@ Ensure all scores are between 1-10 and the final score is calculated as a weight
             logger.error(f"Error validating scoring result: {e}")
             return scoring_result
 
-    def calculate_resume_score(self, analysis_id, criteria_id, jd_id, resume_filename, analysis_data):
+    def calculate_resume_score(self, analysis_id, criteria_id, jd_id, resume_filename, analysis_data, token_count=None):
         """Calculate resume score based on criteria grid and analysis data"""
         try:
             logger.info(f"Calculating score for resume: {resume_filename}")
@@ -1271,9 +1298,9 @@ Ensure all scores are between 1-10 and the final score is calculated as a weight
             
             logger.info(f"AI scoring completed successfully")
             
-            # Save scoring result to database
+            # Save scoring result to database with token count
             score_id = self.save_scoring_result(
-                analysis_id, criteria_id, jd_id, resume_filename, scoring_result
+                analysis_id, criteria_id, jd_id, resume_filename, scoring_result, token_count
             )
             
             return {
@@ -1285,8 +1312,8 @@ Ensure all scores are between 1-10 and the final score is calculated as a weight
             logger.error(f"Error calculating resume score: {e}")
             raise Exception(f"Failed to calculate resume score: {e}")
 
-    def save_scoring_result(self, analysis_id, criteria_id, jd_id, resume_filename, scoring_result):
-        """Save scoring result to database"""
+    def save_scoring_result(self, analysis_id, criteria_id, jd_id, resume_filename, scoring_result, token_count=None):
+        """Save scoring result to database with cumulative token tracking"""
         conn = self.get_db_connection()
         if not conn:
             # Mock save for demo
@@ -1303,16 +1330,56 @@ Ensure all scores are between 1-10 and the final score is calculated as a weight
             consideration = scoring_result.get('consideration', '')
             detailed_assessment = scoring_result.get('detailed_assessment', '')
             
+            # Check if this resume has been processed before for the same JD and criteria
+            logger.info(f"🔍 [ResumeAnalyzer] Looking for previous records for resume: {resume_filename}, jd_id: {jd_id}, criteria_id: {criteria_id}")
+            
+            # First, let's see all records for this resume
+            cur.execute("""
+                SELECT score_id, jd_id, criteria_id, cumulative_token_count, upload_count, created_at
+                FROM resume_scores 
+                WHERE resume_filename = %s
+                ORDER BY created_at DESC
+            """, (resume_filename,))
+            
+            all_records = cur.fetchall()
+            logger.info(f"🔍 [ResumeAnalyzer] All records for {resume_filename}: {all_records}")
+            
+            # Get the sum of all previous token counts for this resume, JD, and criteria
+            cur.execute("""
+                SELECT COALESCE(SUM(token_count), 0) as total_previous_tokens, COUNT(*) as previous_uploads
+                FROM resume_scores 
+                WHERE resume_filename = %s AND jd_id = %s AND criteria_id = %s
+            """, (resume_filename, jd_id, criteria_id))
+            
+            previous_stats = cur.fetchone()
+            total_previous_tokens = previous_stats['total_previous_tokens'] if previous_stats else 0
+            previous_uploads = previous_stats['previous_uploads'] if previous_stats else 0
+            
+            logger.info(f"🔍 [ResumeAnalyzer] Previous stats: total_tokens={total_previous_tokens}, uploads={previous_uploads}")
+            
+            if previous_uploads > 0:
+                # Resume has been processed before - update cumulative count
+                cumulative_token_count = total_previous_tokens + (token_count or 0)
+                upload_count = previous_uploads + 1
+                logger.info(f"Resume {resume_filename} processed {upload_count} times. Previous total: {total_previous_tokens}, Current tokens: {token_count}, New cumulative: {cumulative_token_count}")
+            else:
+                # First time processing this resume
+                cumulative_token_count = token_count or 0
+                upload_count = 1
+                logger.info(f"First time processing resume {resume_filename}. Tokens: {token_count}")
+            
             # Log the extracted data
             logger.info(f"Saving scoring data: final_score={final_score}, recommendation={recommendation}")
             logger.info(f"Parameter scores: {len(parameter_scores)} parameters")
+            logger.info(f"Token count: {token_count}")
+            logger.info(f"Cumulative tokens: {cumulative_token_count}, Upload count: {upload_count}")
             
             insert_query = """
                 INSERT INTO resume_scores (
                     analysis_id, criteria_id, jd_id, resume_filename,
                     parameter_scores, final_score, recommendation, consideration,
-                    detailed_assessment
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    detailed_assessment, token_count, cumulative_token_count, upload_count
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING score_id
             """
             
@@ -1325,7 +1392,10 @@ Ensure all scores are between 1-10 and the final score is calculated as a weight
                 final_score,
                 recommendation,
                 consideration,
-                detailed_assessment
+                detailed_assessment,
+                token_count,
+                cumulative_token_count,
+                upload_count
             ))
             
             result = cur.fetchone()
@@ -1931,7 +2001,7 @@ class ScoringManager:
             logger.error(f"Error fetching criteria grid: {e}")
             raise Exception(f"Failed to fetch criteria grid: {e}")
 
-    def calculate_resume_score(self, analysis_id, criteria_id, jd_id, resume_filename, analysis_data):
+    def calculate_resume_score(self, analysis_id, criteria_id, jd_id, resume_filename, analysis_data, token_count=None):
         """Calculate resume score based on criteria grid and analysis data"""
         try:
             logger.info(f"Calculating score for resume: {resume_filename}")
@@ -1954,9 +2024,9 @@ class ScoringManager:
                 scoring_result = response_data.get('scoring_result', {})
                 logger.info(f"CV analyzer scoring completed successfully")
                 
-                # Save scoring result to database
+                # Save scoring result to database with token count
                 score_id = self.save_scoring_result(
-                    analysis_id, criteria_id, jd_id, resume_filename, scoring_result
+                    analysis_id, criteria_id, jd_id, resume_filename, scoring_result, token_count
                 )
                 
                 return {
@@ -1971,8 +2041,8 @@ class ScoringManager:
             logger.error(f"Error calculating resume score: {e}")
             raise Exception(f"Failed to calculate resume score: {e}")
 
-    def save_scoring_result(self, analysis_id, criteria_id, jd_id, resume_filename, scoring_result):
-        """Save scoring result to database"""
+    def save_scoring_result(self, analysis_id, criteria_id, jd_id, resume_filename, scoring_result, token_count=None):
+        """Save scoring result to database with cumulative token tracking"""
         conn = self.get_db_connection()
         if not conn:
             raise Exception("Database connection failed")
@@ -1987,16 +2057,56 @@ class ScoringManager:
             consideration = scoring_result.get('consideration', '')
             detailed_assessment = scoring_result.get('detailed_assessment', '')
             
+            # Check if this resume has been processed before for the same JD and criteria
+            logger.info(f"🔍 [ScoringManager] Looking for previous records for resume: {resume_filename}, jd_id: {jd_id}, criteria_id: {criteria_id}")
+            
+            # First, let's see all records for this resume
+            cur.execute("""
+                SELECT score_id, jd_id, criteria_id, cumulative_token_count, upload_count, created_at
+                FROM resume_scores 
+                WHERE resume_filename = %s
+                ORDER BY created_at DESC
+            """, (resume_filename,))
+            
+            all_records = cur.fetchall()
+            logger.info(f"🔍 [ScoringManager] All records for {resume_filename}: {all_records}")
+            
+            # Get the sum of all previous token counts for this resume, JD, and criteria
+            cur.execute("""
+                SELECT COALESCE(SUM(token_count), 0) as total_previous_tokens, COUNT(*) as previous_uploads
+                FROM resume_scores 
+                WHERE resume_filename = %s AND jd_id = %s AND criteria_id = %s
+            """, (resume_filename, jd_id, criteria_id))
+            
+            previous_stats = cur.fetchone()
+            total_previous_tokens = previous_stats['total_previous_tokens'] if previous_stats else 0
+            previous_uploads = previous_stats['previous_uploads'] if previous_stats else 0
+            
+            logger.info(f"🔍 [ScoringManager] Previous stats: total_tokens={total_previous_tokens}, uploads={previous_uploads}")
+            
+            if previous_uploads > 0:
+                # Resume has been processed before - update cumulative count
+                cumulative_token_count = total_previous_tokens + (token_count or 0)
+                upload_count = previous_uploads + 1
+                logger.info(f"Resume {resume_filename} processed {upload_count} times. Previous total: {total_previous_tokens}, Current tokens: {token_count}, New cumulative: {cumulative_token_count}")
+            else:
+                # First time processing this resume
+                cumulative_token_count = token_count or 0
+                upload_count = 1
+                logger.info(f"First time processing resume {resume_filename}. Tokens: {token_count}")
+            
             # Log the extracted data
             logger.info(f"Saving scoring data: final_score={final_score}, recommendation={recommendation}")
             logger.info(f"Parameter scores: {len(parameter_scores)} parameters")
+            logger.info(f"Token count: {token_count}")
+            logger.info(f"Cumulative tokens: {cumulative_token_count}, Upload count: {upload_count}")
             
             insert_query = """
                 INSERT INTO resume_scores (
                     analysis_id, criteria_id, jd_id, resume_filename,
                     parameter_scores, final_score, recommendation, consideration,
-                    detailed_assessment
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    detailed_assessment, token_count, cumulative_token_count, upload_count
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING score_id
             """
             
@@ -2009,7 +2119,10 @@ class ScoringManager:
                 final_score,
                 recommendation,
                 consideration,
-                detailed_assessment
+                detailed_assessment,
+                token_count,
+                cumulative_token_count,
+                upload_count
             ))
             
             result = cur.fetchone()
@@ -2056,6 +2169,7 @@ class ScoringManager:
                     rs.score_id, rs.analysis_id, rs.criteria_id, rs.jd_id,
                     rs.resume_filename, rs.parameter_scores, rs.final_score,
                     rs.recommendation, rs.consideration, rs.created_at,
+                    rs.token_count, rs.cumulative_token_count, rs.upload_count,
                     c.criteria_name, jd.title as jd_title
                 FROM resume_scores rs
                 LEFT JOIN criteria c ON rs.criteria_id = c.criteria_id
@@ -2187,19 +2301,34 @@ def analyze_resumes():
                     
                     # Save to database
                     filename = url.split('/')[-1] if '/' in url else 'resume.pdf'
+                    
+                    # Extract original filename from timestamped filename for cumulative tracking
+                    # Format: YYYYMMDD_HHMMSS_original_filename
+                    original_filename = filename
+                    if '_' in filename and len(filename.split('_')) >= 3:
+                        # Remove timestamp prefix (YYYYMMDD_HHMMSS_)
+                        parts = filename.split('_', 2)  # Split into max 3 parts
+                        if len(parts) >= 3:
+                            original_filename = parts[2]  # Get the original filename part
+                    
                     analysis_record = analyzer.save_resume_analysis(jd_id, filename, analysis_result, url)
                     
                     # Perform scoring if criteria is provided
                     scoring_result = None
                     if criteria_id and analysis_record:
                         try:
-                            logger.info(f"Starting scoring for {filename}")
+                            logger.info(f"Starting scoring for {filename} (original: {original_filename})")
+                            # Calculate token count for the resume text
+                            token_count = count_tokens(resume_text) if resume_text else None
+                            logger.info(f"Token count for {filename}: {token_count}")
+                            
                             scoring_result = analyzer.calculate_resume_score(
                                 analysis_record['analysis_id'],
                                 criteria_id,
                                 jd_id,
-                                filename,
-                                analysis_result
+                                original_filename,  # Use original filename for cumulative tracking
+                                analysis_result,
+                                token_count
                             )
                             logger.info(f"Scoring completed for {filename}")
                         except Exception as e:
@@ -2241,19 +2370,34 @@ def analyze_resumes():
                     
                     # Save to database
                     filename = os.path.basename(file_path)
+                    
+                    # Extract original filename from timestamped filename for cumulative tracking
+                    # Format: YYYYMMDD_HHMMSS_original_filename
+                    original_filename = filename
+                    if '_' in filename and len(filename.split('_')) >= 3:
+                        # Remove timestamp prefix (YYYYMMDD_HHMMSS_)
+                        parts = filename.split('_', 2)  # Split into max 3 parts
+                        if len(parts) >= 3:
+                            original_filename = parts[2]  # Get the original filename part
+                    
                     analysis_record = analyzer.save_resume_analysis(jd_id, filename, analysis_result)
                     
                     # Perform scoring if criteria is provided
                     scoring_result = None
                     if criteria_id and analysis_record:
                         try:
-                            logger.info(f"Starting scoring for {filename}")
+                            logger.info(f"Starting scoring for {filename} (original: {original_filename})")
+                            # Calculate token count for the resume text
+                            token_count = count_tokens(resume_text) if resume_text else None
+                            logger.info(f"Token count for {filename}: {token_count}")
+                            
                             scoring_result = analyzer.calculate_resume_score(
                                 analysis_record['analysis_id'],
                                 criteria_id,
                                 jd_id,
-                                filename,
-                                analysis_result
+                                original_filename,  # Use original filename for cumulative tracking
+                                analysis_result,
+                                token_count
                             )
                             logger.info(f"Scoring completed for {filename}")
                         except Exception as e:
@@ -2872,6 +3016,18 @@ def get_score_statistics():
             'status': 'error',
             'message': str(e)
         }), 500
+
+@app.route('/test_token_count', methods=['GET'])
+def test_token_count():
+    """Test endpoint to verify token counting functionality"""
+    test_text = "This is a test string to count tokens."
+    token_count = count_tokens(test_text)
+    return jsonify({
+        'status': 'success',
+        'text': test_text,
+        'token_count': token_count,
+        'max_tokens': MAX_TOKENS
+    })
 
 if __name__ == '__main__':
     print("Starting CV Analyzer Backend on http://127.0.0.1:5002")

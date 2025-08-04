@@ -11,6 +11,7 @@ import PyPDF2
 import docx
 import chardet
 import aspose.words as aw
+import tiktoken
 from supabase import create_client, Client
 from config import Config
 
@@ -38,8 +39,34 @@ AI_ANALYZER_URL = 'http://localhost:5001/analyze'
 UPLOAD_FOLDER = 'uploads'
 ALLOWED_EXTENSIONS = {'txt', 'pdf', 'doc', 'docx'}
 
+# Token counter functions
+def count_tokens(text: str, model: str = "gpt-3.5-turbo") -> int:
+    """Count the number of tokens in a text string using tiktoken."""
+    try:
+        encoding = tiktoken.encoding_for_model(model)
+    except KeyError:
+        encoding = tiktoken.get_encoding("cl100k_base")
+    return len(encoding.encode(text))
+
+def validate_token_limit(text: str, max_tokens: int, model: str = "gpt-3.5-turbo") -> bool:
+    """Check if the text exceeds the maximum token limit."""
+    return count_tokens(text, model) <= max_tokens
+
+def truncate_to_token_limit(text: str, max_tokens: int, model: str = "gpt-3.5-turbo") -> str:
+    """Truncate text to stay within the specified token limit."""
+    try:
+        encoding = tiktoken.encoding_for_model(model)
+    except KeyError:
+        encoding = tiktoken.get_encoding("cl100k_base")
+    
+    tokens = encoding.encode(text)
+    if len(tokens) <= max_tokens:
+        return text
+    return encoding.decode(tokens[:max_tokens])
+
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
+app.config['MAX_TOKENS'] = 400000  # Default max tokens for analysis
 
 # Create upload folder if it doesn't exist
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)

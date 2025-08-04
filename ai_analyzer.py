@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime
 import os
 import logging
+import tiktoken
 from config import Config
 
 # Configure logging
@@ -21,9 +22,70 @@ DB_CONFIG = Config.get_db_config()
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', Config.OPENAI_API_KEY)
 GEMINI_API_KEY = Config.GEMINI_API_KEY
 
+def count_tokens(text: str, model: str = "gpt-3.5-turbo") -> int:
+    """
+    Count the number of tokens in a text string using tiktoken.
+    
+    Args:
+        text (str): The input text to count tokens for
+        model (str): The model to use for tokenization (default: "gpt-3.5-turbo")
+        
+    Returns:
+        int: The number of tokens in the input text
+    """
+    try:
+        encoding = tiktoken.encoding_for_model(model)
+    except KeyError:
+        # Fallback to cl100k_base encoding if model not found
+        encoding = tiktoken.get_encoding("cl100k_base")
+    
+    return len(encoding.encode(text))
+
+def validate_token_limit(text: str, max_tokens: int, model: str = "gpt-3.5-turbo") -> bool:
+    """
+    Check if the text exceeds the maximum token limit.
+    
+    Args:
+        text (str): The input text to check
+        max_tokens (int): The maximum allowed tokens
+        model (str): The model to use for tokenization (default: "gpt-3.5-turbo")
+        
+    Returns:
+        bool: True if text is within token limit, False otherwise
+    """
+    token_count = count_tokens(text, model)
+    return token_count <= max_tokens
+
+def truncate_to_token_limit(text: str, max_tokens: int, model: str = "gpt-3.5-turbo") -> str:
+    """
+    Truncate text to stay within the specified token limit.
+    
+    Args:
+        text (str): The input text to truncate
+        max_tokens (int): The maximum allowed tokens
+        model (str): The model to use for tokenization (default: "gpt-3.5-turbo")
+        
+    Returns:
+        str: The truncated text that fits within the token limit
+    """
+    try:
+        encoding = tiktoken.encoding_for_model(model)
+    except KeyError:
+        encoding = tiktoken.get_encoding("cl100k_base")
+    
+    tokens = encoding.encode(text)
+    if len(tokens) <= max_tokens:
+        return text
+    
+    truncated_tokens = tokens[:max_tokens]
+    return encoding.decode(truncated_tokens)
+
 class JobDescriptionAnalyzer:
     def __init__(self):
         self.db_config = DB_CONFIG
+        self.count_tokens = count_tokens
+        self.validate_token_limit = validate_token_limit
+        self.truncate_to_token_limit = truncate_to_token_limit
         self.setup_ai_client()
 
     def setup_ai_client(self):
@@ -74,20 +136,14 @@ class JobDescriptionAnalyzer:
             self.ai_provider = 'intelligent_analysis'
 
     def _setup_openai(self):
-        """Setup OpenAI client"""
+        """Setup OpenAI client with token counting"""
         if OPENAI_API_KEY and OPENAI_API_KEY != 'your-openai-api-key' and len(OPENAI_API_KEY) > 10:
             try:
-                import openai
                 from openai import OpenAI
-                
-                # Test the API key
-                client = OpenAI(api_key=OPENAI_API_KEY)
-                test_response = client.chat.completions.create(
-                    model="gpt-3.5-turbo",
-                    messages=[{"role": "user", "content": "Hello"}],
-                    max_tokens=10
-                )
-                
+                self.client = OpenAI(api_key=OPENAI_API_KEY)
+                self.ai_provider = 'openai'
+                self.max_tokens = 400000  # Default max tokens for chat models
+                logger.info("Successfully initialized OpenAI client with token counting")
                 if test_response and test_response.choices:
                     self.ai_client = client
                     self.ai_provider = 'openai'
@@ -651,7 +707,13 @@ Final Score = [Rating for Parameter 1] + [Rating for Parameter 2]+....+[Rating f
             
             # Split response into sections
             sections = {}
-            current_section = None
+            
+            # Check and truncate text if needed
+            max_context_tokens = 4000  # Default max tokens
+            if count_tokens(response_text) > max_context_tokens:
+                logger.warning(f"Input text exceeds {max_context_tokens} tokens, truncating...")
+                response_text = truncate_to_token_limit(response_text, max_context_tokens)
+                logger.info(f"Truncated text to {count_tokens(response_text)} tokens")
             
             for line in response_text.split('\n'):
                 line = line.strip()

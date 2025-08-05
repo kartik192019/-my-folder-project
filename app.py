@@ -1,4 +1,5 @@
 from flask import Flask, render_template, request, jsonify, flash, redirect, url_for
+from flask_cors import CORS
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import uuid
@@ -16,6 +17,7 @@ from supabase import create_client, Client
 from config import Config
 
 app = Flask(__name__)
+CORS(app)  # Enable CORS for all routes
 app.secret_key = 'your-secret-key-here'  # Change this to a secure secret key
 
 # Add custom filter for JSON parsing in templates
@@ -713,6 +715,35 @@ def view_job_description(jd_id):
     except Exception as e:
         flash(f'Error fetching job description: {str(e)}')
         return redirect(url_for('list_job_descriptions'))
+
+@app.route('/health')
+def health_check():
+    """Health check endpoint"""
+    try:
+        # Test database connection
+        conn = get_db_connection()
+        if conn:
+            conn.close()
+            return jsonify({
+                'status': 'healthy',
+                'service': 'jd_upload',
+                'port': 5004,
+                'database': 'connected'
+            })
+        else:
+            return jsonify({
+                'status': 'unhealthy',
+                'service': 'jd_upload',
+                'port': 5004,
+                'database': 'disconnected'
+            }), 500
+    except Exception as e:
+        return jsonify({
+            'status': 'unhealthy',
+            'service': 'jd_upload',
+            'port': 5004,
+            'error': str(e)
+        }), 500
 
 @app.route('/test')
 def test_text_cleaning():

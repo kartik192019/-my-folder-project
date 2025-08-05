@@ -1,4 +1,5 @@
 from flask import Flask, render_template, request, jsonify, flash, redirect, url_for
+from flask_cors import CORS
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import uuid
@@ -17,6 +18,7 @@ from supabase import create_client, Client
 from config import Config
 
 app = Flask(__name__)
+CORS(app)  # Enable CORS for all routes
 app.secret_key = 'your-secret-key-here'  # Change this to a secure secret key
 
 # Configure logging
@@ -649,6 +651,38 @@ def list_job_descriptions():
     except Exception as e:
         flash(f'Error fetching job descriptions: {str(e)}')
         return render_template('list_resumes.html', job_descriptions=[])
+
+@app.route('/api/job_descriptions')
+def api_list_job_descriptions():
+    """API endpoint to list all job descriptions as JSON"""
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({'error': 'Database connection failed'}), 500
+    
+    try:
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("""
+            SELECT jd_id, title, company_id, user_id, created_at, updated_at, file_id, jd_file
+            FROM job_descriptions
+            ORDER BY created_at DESC
+            LIMIT 100
+        """)
+        job_descriptions = cur.fetchall()
+        
+        # Convert to list of dictionaries for JSON serialization
+        result = []
+        for jd in job_descriptions:
+            jd_dict = dict(jd)
+            # Convert UUID to string for JSON serialization
+            jd_dict['jd_id'] = str(jd_dict['jd_id'])
+            result.append(jd_dict)
+        
+        cur.close()
+        conn.close()
+        
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': f'Error fetching job descriptions: {str(e)}'}), 500
 
 @app.route('/job_description/<uuid:jd_id>')
 def view_job_description(jd_id):

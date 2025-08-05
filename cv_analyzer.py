@@ -1,4 +1,5 @@
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 import psycopg2
 from psycopg2.extras import RealDictCursor, Json
 import json
@@ -15,6 +16,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+CORS(app)  # Enable CORS for all routes
 
 # Token counter functions
 def count_tokens(text: str, model: str = "gpt-3.5-turbo") -> int:
@@ -3028,6 +3030,102 @@ def test_token_count():
         'token_count': token_count,
         'max_tokens': MAX_TOKENS
     })
+
+@app.route('/analysis/results', methods=['GET'])
+def get_resume_analysis_results():
+    """Get resume analysis results with full details"""
+    try:
+        jd_id = request.args.get('jd_id')
+        limit = int(request.args.get('limit', 50))
+        offset = int(request.args.get('offset', 0))
+        
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({
+                'status': 'error',
+                'message': 'Database connection failed'
+            }), 500
+        
+        try:
+            cur = conn.cursor(cursor_factory=RealDictCursor)
+            
+            # Build dynamic query
+            where_conditions = []
+            params = []
+            
+            if jd_id:
+                where_conditions.append("ra.jd_id = %s")
+                params.append(jd_id)
+            
+            where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
+            
+            query = f"""
+                SELECT 
+                    ra.analysis_id, ra.jd_id, ra.resume_filename, ra.resume_url,
+                    ra.analysis_data, ra.status, ra.created_at,
+                    jd.title as jd_title
+                FROM resume_analyses ra
+                LEFT JOIN job_descriptions jd ON ra.jd_id = jd.jd_id
+                WHERE {where_clause}
+                ORDER BY ra.created_at DESC
+                LIMIT %s OFFSET %s
+            """
+            
+            params.extend([limit, offset])
+            cur.execute(query, params)
+            results = cur.fetchall()
+            
+            # Process the results to include parsed analysis data
+            processed_results = []
+            for row in results:
+                result = dict(row)
+                
+                # Parse the analysis_data JSON
+                if result['analysis_data']:
+                    try:
+                        analysis_data = json.loads(result['analysis_data'])
+                        result['personal_details'] = analysis_data.get('personal_details', {})
+                        result['skills'] = analysis_data.get('skills', [])
+                        result['education'] = analysis_data.get('education', [])
+                        result['experience'] = analysis_data.get('experience', [])
+                        result['summary'] = analysis_data.get('summary', '')
+                    except (json.JSONDecodeError, TypeError):
+                        # If parsing fails, keep the raw data
+                        result['analysis_data_raw'] = result['analysis_data']
+                        result['personal_details'] = {}
+                        result['skills'] = []
+                        result['education'] = []
+                        result['experience'] = []
+                        result['summary'] = ''
+                
+                processed_results.append(result)
+            
+            cur.close()
+            conn.close()
+            
+            return jsonify({
+                'status': 'success',
+                'data': processed_results,
+                'count': len(processed_results)
+            })
+            
+        except Exception as e:
+            if conn:
+                conn.rollback()
+                cur.close()
+                conn.close()
+            logger.error(f"Error fetching resume analysis results: {e}")
+            return jsonify({
+                'status': 'error',
+                'message': str(e)
+            }), 500
+            
+    except Exception as e:
+        logger.error(f"Error in get_resume_analysis_results: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
 
 if __name__ == '__main__':
     print("Starting CV Analyzer Backend on http://127.0.0.1:5002")

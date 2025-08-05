@@ -4,6 +4,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor, Json
 import json
 import uuid
+import hashlib
 from datetime import datetime
 import os
 import logging
@@ -42,6 +43,20 @@ def truncate_to_token_limit(text: str, max_tokens: int, model: str = "gpt-3.5-tu
     if len(tokens) <= max_tokens:
         return text
     return encoding.decode(tokens[:max_tokens])
+
+def generate_resume_content_hash(resume_text: str) -> str:
+    """Generate a hash based on resume content for tracking across different job descriptions"""
+    if not resume_text:
+        return ""
+    
+    # Clean and normalize the text for consistent hashing
+    cleaned_text = resume_text.lower().strip()
+    # Remove extra whitespace and normalize
+    cleaned_text = ' '.join(cleaned_text.split())
+    
+    # Generate SHA-256 hash of the cleaned content
+    content_hash = hashlib.sha256(cleaned_text.encode('utf-8')).hexdigest()
+    return content_hash
 
 # Database configuration
 DB_CONFIG = Config.get_db_config()
@@ -1252,7 +1267,7 @@ Ensure all scores are between 1-10 and the final score is calculated as a weight
             logger.error(f"Error validating scoring result: {e}")
             return scoring_result
 
-    def calculate_resume_score(self, analysis_id, criteria_id, jd_id, resume_filename, analysis_data, token_count=None):
+    def calculate_resume_score(self, analysis_id, criteria_id, jd_id, resume_filename, analysis_data, token_count=None, content_hash=None):
         """Calculate resume score based on criteria grid and analysis data"""
         try:
             logger.info(f"Calculating score for resume: {resume_filename}")
@@ -1300,9 +1315,9 @@ Ensure all scores are between 1-10 and the final score is calculated as a weight
             
             logger.info(f"AI scoring completed successfully")
             
-            # Save scoring result to database with token count
+            # Save scoring result to database with token count and content hash
             score_id = self.save_scoring_result(
-                analysis_id, criteria_id, jd_id, resume_filename, scoring_result, token_count
+                analysis_id, criteria_id, jd_id, resume_filename, scoring_result, token_count, content_hash
             )
             
             return {
@@ -1314,8 +1329,8 @@ Ensure all scores are between 1-10 and the final score is calculated as a weight
             logger.error(f"Error calculating resume score: {e}")
             raise Exception(f"Failed to calculate resume score: {e}")
 
-    def save_scoring_result(self, analysis_id, criteria_id, jd_id, resume_filename, scoring_result, token_count=None):
-        """Save scoring result to database with cumulative token tracking"""
+    def save_scoring_result(self, analysis_id, criteria_id, jd_id, resume_filename, scoring_result, token_count=None, content_hash=None):
+        """Save scoring result to database with cumulative token tracking using content hash"""
         conn = self.get_db_connection()
         if not conn:
             # Mock save for demo
@@ -1332,26 +1347,25 @@ Ensure all scores are between 1-10 and the final score is calculated as a weight
             consideration = scoring_result.get('consideration', '')
             detailed_assessment = scoring_result.get('detailed_assessment', '')
             
-            # Check if this resume has been processed before for the same JD and criteria
-            logger.info(f"🔍 [ResumeAnalyzer] Looking for previous records for resume: {resume_filename}, jd_id: {jd_id}, criteria_id: {criteria_id}")
+            # Use content hash for tracking if available, otherwise fall back to filename
+            tracking_key = content_hash if content_hash else resume_filename
+            logger.info(f"🔍 [ResumeAnalyzer] Using tracking key: {tracking_key} (content_hash: {content_hash}, filename: {resume_filename})")
             
-            # First, let's see all records for this resume
-            cur.execute("""
-                SELECT score_id, jd_id, criteria_id, cumulative_token_count, upload_count, created_at
-                FROM resume_scores 
-                WHERE resume_filename = %s
-                ORDER BY created_at DESC
-            """, (resume_filename,))
-            
-            all_records = cur.fetchall()
-            logger.info(f"🔍 [ResumeAnalyzer] All records for {resume_filename}: {all_records}")
-            
-            # Get the sum of all previous token counts for this resume, JD, and criteria
-            cur.execute("""
-                SELECT COALESCE(SUM(token_count), 0) as total_previous_tokens, COUNT(*) as previous_uploads
-                FROM resume_scores 
-                WHERE resume_filename = %s AND jd_id = %s AND criteria_id = %s
-            """, (resume_filename, jd_id, criteria_id))
+            # Check if this resume has been processed before using content hash
+            if content_hash:
+                # Get the sum of all previous token counts for this resume content (across all JDs and criteria)
+                cur.execute("""
+                    SELECT COALESCE(SUM(token_count), 0) as total_previous_tokens, COUNT(*) as previous_uploads
+                    FROM resume_scores 
+                    WHERE content_hash = %s
+                """, (content_hash,))
+            else:
+                # Fallback to filename-based tracking
+                cur.execute("""
+                    SELECT COALESCE(SUM(token_count), 0) as total_previous_tokens, COUNT(*) as previous_uploads
+                    FROM resume_scores 
+                    WHERE resume_filename = %s AND jd_id = %s AND criteria_id = %s
+                """, (resume_filename, jd_id, criteria_id))
             
             previous_stats = cur.fetchone()
             total_previous_tokens = previous_stats['total_previous_tokens'] if previous_stats else 0
@@ -1363,42 +1377,72 @@ Ensure all scores are between 1-10 and the final score is calculated as a weight
                 # Resume has been processed before - update cumulative count
                 cumulative_token_count = total_previous_tokens + (token_count or 0)
                 upload_count = previous_uploads + 1
-                logger.info(f"Resume {resume_filename} processed {upload_count} times. Previous total: {total_previous_tokens}, Current tokens: {token_count}, New cumulative: {cumulative_token_count}")
+                logger.info(f"Resume content processed {upload_count} times. Previous total: {total_previous_tokens}, Current tokens: {token_count}, New cumulative: {cumulative_token_count}")
             else:
                 # First time processing this resume
                 cumulative_token_count = token_count or 0
                 upload_count = 1
-                logger.info(f"First time processing resume {resume_filename}. Tokens: {token_count}")
+                logger.info(f"First time processing resume content. Tokens: {token_count}")
             
             # Log the extracted data
             logger.info(f"Saving scoring data: final_score={final_score}, recommendation={recommendation}")
             logger.info(f"Parameter scores: {len(parameter_scores)} parameters")
             logger.info(f"Token count: {token_count}")
             logger.info(f"Cumulative tokens: {cumulative_token_count}, Upload count: {upload_count}")
+            logger.info(f"Content hash: {content_hash}")
             
-            insert_query = """
-                INSERT INTO resume_scores (
-                    analysis_id, criteria_id, jd_id, resume_filename,
-                    parameter_scores, final_score, recommendation, consideration,
-                    detailed_assessment, token_count, cumulative_token_count, upload_count
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING score_id
-            """
-            
-            cur.execute(insert_query, (
-                analysis_id,
-                criteria_id,
-                jd_id,
-                resume_filename,
-                json.dumps(parameter_scores),  # Use simple JSON string
-                final_score,
-                recommendation,
-                consideration,
-                detailed_assessment,
-                token_count,
-                cumulative_token_count,
-                upload_count
-            ))
+            # Check if content_hash column exists, if not use the old schema
+            try:
+                insert_query = """
+                    INSERT INTO resume_scores (
+                        analysis_id, criteria_id, jd_id, resume_filename, content_hash,
+                        parameter_scores, final_score, recommendation, consideration,
+                        detailed_assessment, token_count, cumulative_token_count, upload_count
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING score_id
+                """
+                
+                cur.execute(insert_query, (
+                    analysis_id,
+                    criteria_id,
+                    jd_id,
+                    resume_filename,
+                    content_hash,
+                    json.dumps(parameter_scores),  # Use simple JSON string
+                    final_score,
+                    recommendation,
+                    consideration,
+                    detailed_assessment,
+                    token_count,
+                    cumulative_token_count,
+                    upload_count
+                ))
+            except psycopg2.ProgrammingError:
+                # Fallback to old schema without content_hash column
+                logger.warning("content_hash column not found, using old schema")
+                insert_query = """
+                    INSERT INTO resume_scores (
+                        analysis_id, criteria_id, jd_id, resume_filename,
+                        parameter_scores, final_score, recommendation, consideration,
+                        detailed_assessment, token_count, cumulative_token_count, upload_count
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING score_id
+                """
+                
+                cur.execute(insert_query, (
+                    analysis_id,
+                    criteria_id,
+                    jd_id,
+                    resume_filename,
+                    json.dumps(parameter_scores),  # Use simple JSON string
+                    final_score,
+                    recommendation,
+                    consideration,
+                    detailed_assessment,
+                    token_count,
+                    cumulative_token_count,
+                    upload_count
+                ))
             
             result = cur.fetchone()
             conn.commit()
@@ -2284,14 +2328,17 @@ def analyze_resumes():
         job_requirements = jd_data['requirements']
         logger.info(f"Retrieved job requirements: {job_requirements}")
         
-        # Process each resume
+        # Process each resume with enhanced batch processing
         results = []
         failed_resumes = []
+        batch_size = len(resume_urls) + len(resume_files)
+        
+        logger.info(f"🔄 Starting batch processing of {batch_size} files")
         
         # Process URLs first (files uploaded to Supabase)
-        for url in resume_urls:
+        for i, url in enumerate(resume_urls, 1):
             try:
-                logger.info(f"Processing resume URL: {url}")
+                logger.info(f"📄 Processing file {i}/{batch_size}: {url}")
                 resume_text = analyzer.extract_text_from_url(url)
                 
                 if resume_text:
@@ -2315,52 +2362,94 @@ def analyze_resumes():
                     
                     analysis_record = analyzer.save_resume_analysis(jd_id, filename, analysis_result, url)
                     
-                    # Perform scoring if criteria is provided
+                    # Perform scoring if criteria is provided with retry logic
                     scoring_result = None
                     if criteria_id and analysis_record:
-                        try:
-                            logger.info(f"Starting scoring for {filename} (original: {original_filename})")
-                            # Calculate token count for the resume text
-                            token_count = count_tokens(resume_text) if resume_text else None
-                            logger.info(f"Token count for {filename}: {token_count}")
-                            
-                            scoring_result = analyzer.calculate_resume_score(
-                                analysis_record['analysis_id'],
-                                criteria_id,
-                                jd_id,
-                                original_filename,  # Use original filename for cumulative tracking
-                                analysis_result,
-                                token_count
-                            )
-                            logger.info(f"Scoring completed for {filename}")
-                        except Exception as e:
-                            logger.error(f"Scoring failed for {filename}: {e}")
+                        scoring_success = False
+                        max_retries = 3
+                        
+                        for attempt in range(max_retries):
+                            try:
+                                logger.info(f"🎯 Starting scoring for {filename} (attempt {attempt + 1}/{max_retries})")
+                                
+                                # Generate content hash for resume tracking
+                                content_hash = generate_resume_content_hash(resume_text)
+                                logger.info(f"Content hash for {filename}: {content_hash}")
+                                
+                                # Generate scoring prompt to calculate accurate token count
+                                jd_data = analyzer.get_job_description_requirements(jd_id)
+                                jd_parameters = jd_data.get('requirements', {}) if jd_data else {}
+                                criteria_grid = analyzer.get_criteria_grid(criteria_id)
+                                
+                                # Generate the full scoring prompt
+                                scoring_prompt = analyzer._get_scoring_prompt(
+                                    jd_parameters,
+                                    analysis_result,
+                                    criteria_grid,
+                                    original_filename
+                                )
+                                
+                                # Calculate token count for the entire prompt (more accurate)
+                                token_count = count_tokens(scoring_prompt) if scoring_prompt else None
+                                logger.info(f"Token count for {filename} (full prompt): {token_count}")
+                                
+                                # Add delay between attempts to prevent resource conflicts
+                                if attempt > 0:
+                                    import time
+                                    time.sleep(2)  # 2 second delay between retries
+                                
+                                scoring_result = analyzer.calculate_resume_score(
+                                    analysis_record['analysis_id'],
+                                    criteria_id,
+                                    jd_id,
+                                    original_filename,  # Use original filename for cumulative tracking
+                                    analysis_result,
+                                    token_count,
+                                    content_hash
+                                )
+                                
+                                logger.info(f"✅ Scoring completed for {filename} (attempt {attempt + 1})")
+                                scoring_success = True
+                                break
+                                
+                            except Exception as e:
+                                logger.error(f"❌ Scoring attempt {attempt + 1} failed for {filename}: {e}")
+                                if attempt == max_retries - 1:
+                                    logger.error(f"🚨 All scoring attempts failed for {filename}")
+                                    failed_resumes.append({
+                                        'filename': filename,
+                                        'error': f'Scoring failed after {max_retries} attempts: {str(e)}'
+                                    })
+                        
+                        if not scoring_success:
+                            logger.warning(f"⚠️ Skipping scoring for {filename} due to repeated failures")
                     
                     results.append({
                         'filename': filename,
                         'url': url,
                         'analysis': structured_analysis,
-                        'scoring': scoring_result
+                        'scoring': scoring_result,
+                        'status': 'success' if scoring_success else 'analysis_only'
                     })
                     
-                    logger.info(f"Successfully analyzed resume: {filename}")
+                    logger.info(f"✅ Successfully processed {filename}")
                 else:
                     failed_resumes.append({
-                        'url': url,
+                        'filename': filename,
                         'error': 'Could not extract text from resume'
                     })
                     
             except Exception as e:
-                logger.error(f"Error processing resume URL {url}: {e}")
+                logger.error(f"❌ Error processing resume URL {url}: {e}")
                 failed_resumes.append({
                     'url': url,
                     'error': str(e)
                 })
         
         # Process local files (fallback when Supabase upload fails)
-        for file_path in resume_files:
+        for i, file_path in enumerate(resume_files, len(resume_urls) + 1):
             try:
-                logger.info(f"Processing resume file: {file_path}")
+                logger.info(f"📄 Processing file {i}/{batch_size}: {file_path}")
                 resume_text = analyzer.extract_text_from_local_file(file_path)
                 
                 if resume_text:
@@ -2384,43 +2473,85 @@ def analyze_resumes():
                     
                     analysis_record = analyzer.save_resume_analysis(jd_id, filename, analysis_result)
                     
-                    # Perform scoring if criteria is provided
+                    # Perform scoring if criteria is provided with retry logic
                     scoring_result = None
                     if criteria_id and analysis_record:
-                        try:
-                            logger.info(f"Starting scoring for {filename} (original: {original_filename})")
-                            # Calculate token count for the resume text
-                            token_count = count_tokens(resume_text) if resume_text else None
-                            logger.info(f"Token count for {filename}: {token_count}")
-                            
-                            scoring_result = analyzer.calculate_resume_score(
-                                analysis_record['analysis_id'],
-                                criteria_id,
-                                jd_id,
-                                original_filename,  # Use original filename for cumulative tracking
-                                analysis_result,
-                                token_count
-                            )
-                            logger.info(f"Scoring completed for {filename}")
-                        except Exception as e:
-                            logger.error(f"Scoring failed for {filename}: {e}")
+                        scoring_success = False
+                        max_retries = 3
+                        
+                        for attempt in range(max_retries):
+                            try:
+                                logger.info(f"🎯 Starting scoring for {filename} (attempt {attempt + 1}/{max_retries})")
+                                
+                                # Generate content hash for resume tracking
+                                content_hash = generate_resume_content_hash(resume_text)
+                                logger.info(f"Content hash for {filename}: {content_hash}")
+                                
+                                # Generate scoring prompt to calculate accurate token count
+                                jd_data = analyzer.get_job_description_requirements(jd_id)
+                                jd_parameters = jd_data.get('requirements', {}) if jd_data else {}
+                                criteria_grid = analyzer.get_criteria_grid(criteria_id)
+                                
+                                # Generate the full scoring prompt
+                                scoring_prompt = analyzer._get_scoring_prompt(
+                                    jd_parameters,
+                                    analysis_result,
+                                    criteria_grid,
+                                    original_filename
+                                )
+                                
+                                # Calculate token count for the entire prompt (more accurate)
+                                token_count = count_tokens(scoring_prompt) if scoring_prompt else None
+                                logger.info(f"Token count for {filename} (full prompt): {token_count}")
+                                
+                                # Add delay between attempts to prevent resource conflicts
+                                if attempt > 0:
+                                    import time
+                                    time.sleep(2)  # 2 second delay between retries
+                                
+                                scoring_result = analyzer.calculate_resume_score(
+                                    analysis_record['analysis_id'],
+                                    criteria_id,
+                                    jd_id,
+                                    original_filename,  # Use original filename for cumulative tracking
+                                    analysis_result,
+                                    token_count,
+                                    content_hash
+                                )
+                                
+                                logger.info(f"✅ Scoring completed for {filename} (attempt {attempt + 1})")
+                                scoring_success = True
+                                break
+                                
+                            except Exception as e:
+                                logger.error(f"❌ Scoring attempt {attempt + 1} failed for {filename}: {e}")
+                                if attempt == max_retries - 1:
+                                    logger.error(f"🚨 All scoring attempts failed for {filename}")
+                                    failed_resumes.append({
+                                        'filename': filename,
+                                        'error': f'Scoring failed after {max_retries} attempts: {str(e)}'
+                                    })
+                        
+                        if not scoring_success:
+                            logger.warning(f"⚠️ Skipping scoring for {filename} due to repeated failures")
                     
                     results.append({
                         'filename': filename,
                         'file_path': file_path,
                         'analysis': structured_analysis,
-                        'scoring': scoring_result
+                        'scoring': scoring_result,
+                        'status': 'success' if scoring_success else 'analysis_only'
                     })
                     
-                    logger.info(f"Successfully analyzed resume: {filename}")
+                    logger.info(f"✅ Successfully processed {filename}")
                 else:
                     failed_resumes.append({
-                        'file_path': file_path,
+                        'filename': filename,
                         'error': 'Could not extract text from resume'
                     })
                     
             except Exception as e:
-                logger.error(f"Error processing resume file {file_path}: {e}")
+                logger.error(f"❌ Error processing resume file {file_path}: {e}")
                 failed_resumes.append({
                     'file_path': file_path,
                     'error': str(e)

@@ -527,8 +527,27 @@ def upload_resumes():
                 # Check how many records were actually created
                 conn = get_db_connection()
                 cur = conn.cursor()
-                cur.execute("SELECT COUNT(*) FROM resume_analyses WHERE jd_id = %s", (jd_id,))
+                
+                # Get the count of records that were just created (new records only)
+                # We can estimate this by counting records created in the last few minutes
+                cur.execute("""
+                    SELECT COUNT(*) FROM resume_analyses 
+                    WHERE jd_id = %s 
+                    AND created_at >= NOW() - INTERVAL '5 minutes'
+                """, (jd_id,))
                 records_created = cur.fetchone()[0]
+                
+                # Alternative: count records that match the uploaded filenames
+                if records_created == 0 and uploaded_files:
+                    filename_list = [file['filename'] for file in uploaded_files]
+                    placeholders = ','.join(['%s'] * len(filename_list))
+                    cur.execute(f"""
+                        SELECT COUNT(*) FROM resume_analyses 
+                        WHERE jd_id = %s 
+                        AND resume_filename IN ({placeholders})
+                    """, (jd_id, *filename_list))
+                    records_created = cur.fetchone()[0]
+                
                 cur.close()
                 conn.close()
                 

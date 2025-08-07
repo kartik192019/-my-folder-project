@@ -446,9 +446,9 @@ def upload_resumes():
             
             # Get existing resume filenames for this JD
             cur.execute("""
-                SELECT resume_filename 
-                FROM resume_analyses 
-                WHERE jd_id = %s
+                SELECT candidate_name as resume_filename 
+                FROM assessment_reports 
+                WHERE resolved_jd_id = %s
             """, (jd_id,))
             
             existing_filenames = {row['resume_filename'] for row in cur.fetchall()}
@@ -531,8 +531,8 @@ def upload_resumes():
                 # Get the count of records that were just created (new records only)
                 # We can estimate this by counting records created in the last few minutes
                 cur.execute("""
-                    SELECT COUNT(*) FROM resume_analyses 
-                    WHERE jd_id = %s 
+                    SELECT COUNT(*) FROM assessment_reports 
+                    WHERE resolved_jd_id = %s 
                     AND created_at >= NOW() - INTERVAL '5 minutes'
                 """, (jd_id,))
                 records_created = cur.fetchone()[0]
@@ -542,9 +542,9 @@ def upload_resumes():
                     filename_list = [file['filename'] for file in uploaded_files]
                     placeholders = ','.join(['%s'] * len(filename_list))
                     cur.execute(f"""
-                        SELECT COUNT(*) FROM resume_analyses 
-                        WHERE jd_id = %s 
-                        AND resume_filename IN ({placeholders})
+                        SELECT COUNT(*) FROM assessment_reports 
+                        WHERE resolved_jd_id = %s 
+                        AND candidate_name IN ({placeholders})
                     """, (jd_id, *filename_list))
                     records_created = cur.fetchone()[0]
                 
@@ -772,9 +772,9 @@ def view_job_description_resumes(jd_id):
         
         # Get resume analysis results
         cur.execute("""
-            SELECT analysis_id, resume_filename, resume_url, analysis_data, status, created_at
-            FROM resume_analyses
-            WHERE jd_id = %s
+            SELECT id as analysis_id, candidate_name as resume_filename, resume_url, scoring as analysis_data, status, created_at
+            FROM assessment_reports
+            WHERE resolved_jd_id = %s
             ORDER BY created_at DESC
         """, (jd_id,))
         
@@ -782,10 +782,10 @@ def view_job_description_resumes(jd_id):
         
         # Get scoring results if available
         cur.execute("""
-            SELECT score_id, resume_filename, final_score, recommendation, created_at
-            FROM resume_scores
-            WHERE jd_id = %s
-            ORDER BY final_score DESC, created_at DESC
+            SELECT id as score_id, candidate_name as resume_filename, overall_score as final_score, recommendation, created_at
+            FROM assessment_reports
+            WHERE resolved_jd_id = %s AND overall_score IS NOT NULL
+            ORDER BY overall_score DESC, created_at DESC
         """, (jd_id,))
         
         scoring_results = cur.fetchall()
@@ -827,17 +827,16 @@ def view_scoring_details(jd_id):
         # Get all scoring results for this JD
         cur.execute("""
             SELECT 
-                rs.score_id, rs.analysis_id, rs.resume_filename, 
-                rs.final_score, rs.recommendation, rs.consideration,
-                rs.parameter_scores, rs.created_at, rs.token_count,
-                rs.cumulative_token_count, rs.upload_count,
+                ar.id as score_id, ar.id as analysis_id, ar.candidate_name as resume_filename, 
+                ar.overall_score as final_score, ar.recommendation, ar.scoring->>'consideration' as consideration,
+                ar.scoring as parameter_scores, ar.created_at, ar.token_count,
+                ar.cumulative_token_count, ar.upload_count,
                 c.criteria_name,
-                ra.analysis_data
-            FROM resume_scores rs
-            LEFT JOIN criteria c ON rs.criteria_id = c.criteria_id
-            LEFT JOIN resume_analyses ra ON rs.analysis_id = ra.analysis_id
-            WHERE rs.jd_id = %s
-            ORDER BY rs.final_score DESC, rs.created_at DESC
+                ar.scoring as analysis_data
+            FROM assessment_reports ar
+            LEFT JOIN criteria c ON ar.criteria_id = c.criteria_id
+            WHERE ar.resolved_jd_id = %s AND ar.overall_score IS NOT NULL
+            ORDER BY ar.overall_score DESC, ar.created_at DESC
         """, (jd_id,))
         
         scoring_results = cur.fetchall()
@@ -846,14 +845,14 @@ def view_scoring_details(jd_id):
         cur.execute("""
             SELECT 
                 COUNT(*) as total_resumes,
-                AVG(final_score) as avg_score,
-                MAX(final_score) as max_score,
-                MIN(final_score) as min_score,
+                AVG(overall_score) as avg_score,
+                MAX(overall_score) as max_score,
+                MIN(overall_score) as min_score,
                 COUNT(CASE WHEN recommendation = 'To be interviewed' THEN 1 END) as to_interview,
                 COUNT(CASE WHEN recommendation = 'Candidature rejected' THEN 1 END) as rejected,
                 COUNT(CASE WHEN recommendation = 'Review further' THEN 1 END) as review_further
-            FROM resume_scores
-            WHERE jd_id = %s
+            FROM assessment_reports
+            WHERE resolved_jd_id = %s AND overall_score IS NOT NULL
         """, (jd_id,))
         
         stats = cur.fetchone()
@@ -884,14 +883,14 @@ def get_scoring_details(score_id):
         # Get the scoring result
         cur.execute("""
             SELECT 
-                rs.score_id, rs.analysis_id, rs.resume_filename, 
-                rs.final_score, rs.recommendation, rs.consideration,
-                rs.parameter_scores, rs.created_at, rs.token_count,
-                rs.cumulative_token_count, rs.upload_count,
+                ar.id as score_id, ar.id as analysis_id, ar.candidate_name as resume_filename, 
+                ar.overall_score as final_score, ar.recommendation, ar.scoring->>'consideration' as consideration,
+                ar.scoring as parameter_scores, ar.created_at, ar.token_count,
+                ar.cumulative_token_count, ar.upload_count,
                 c.criteria_name, c.weightage
-            FROM resume_scores rs
-            LEFT JOIN criteria c ON rs.criteria_id = c.criteria_id
-            WHERE rs.score_id = %s
+            FROM assessment_reports ar
+            LEFT JOIN criteria c ON ar.criteria_id = c.criteria_id
+            WHERE ar.id = %s
         """, (str(score_id),))
         
         score_result = cur.fetchone()

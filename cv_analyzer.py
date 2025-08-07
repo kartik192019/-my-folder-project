@@ -712,9 +712,13 @@ Important: Return only the JSON object, nothing else. Ensure proper formatting a
             logger.error(f"Resume analysis error: {e}")
             raise Exception(f"Failed to analyze resume: {e}")
 
-    def save_resume_analysis(self, jd_id, resume_filename, analysis_result, resume_url=None):
-        """Save resume analysis to database using single resume_analyses table"""
+    def save_resume_analysis(self, jd_id, resume_filename, analysis_result, resume_url=None, candidate_name=None, company_id=None, user_id=None, criteria_id=None):
+        """Save resume analysis to database using new flow: resumes -> assessment_reports"""
         logger.info(f"Starting save_resume_analysis for {resume_filename}")
+        
+        # Extract candidate name from filename if not provided
+        if not candidate_name:
+            candidate_name = self._extract_candidate_name_from_filename(resume_filename)
         
         conn = self.get_db_connection()
         if not conn:
@@ -726,36 +730,65 @@ Important: Return only the JSON object, nothing else. Ensure proper formatting a
         try:
             cur = conn.cursor()
             
-            # Structure the analysis data in the required format
+            # Step 1: Save to resumes table
+            resume_insert_query = """
+                INSERT INTO resumes (candidate_name, cv_file, company_id, user_id, evaluation_scores)
+                VALUES (%s, %s, %s, %s, %s)
+                RETURNING resume_id
+            """
+            
             structured_analysis = self._structure_analysis_data(analysis_result)
             logger.info(f"Structured analysis data: {json.dumps(structured_analysis, indent=2)}")
             
-            # Insert into resume_analyses table
-            insert_query = """
-                INSERT INTO resume_analyses (jd_id, resume_filename, resume_url, analysis_data, status)
-                VALUES (%s, %s, %s, %s, %s)
-                RETURNING analysis_id
-            """
-            
-            # Use json.dumps instead of Json() for better compatibility
-            logger.info(f"Attempting to save analysis for {resume_filename} with JD: {jd_id}")
-            logger.info(f"Insert query: {insert_query}")
-            
-            cur.execute(insert_query, (
-                jd_id,
+            cur.execute(resume_insert_query, (
+                candidate_name,
                 resume_filename,
-                resume_url,
-                json.dumps(structured_analysis),  # Use json.dumps instead of Json()
-                'active'
+                company_id,
+                user_id,
+                json.dumps(structured_analysis)
             ))
             
-            analysis_id = cur.fetchone()[0]
+            resume_id = cur.fetchone()[0]
+            logger.info(f"Saved to resumes table with ID: {resume_id}")
+            
+            # Step 2: Save to assessment_reports table
+            assessment_insert_query = """
+                INSERT INTO assessment_reports (
+                    resolved_jd_id, criteria_id, candidate_name, resume_url, 
+                    scoring, status, created_by, token_count, content_hash
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """
+            
+            # Generate content hash from resume text
+            content_hash = generate_resume_content_hash(str(analysis_result))
+            token_count = count_tokens(str(analysis_result))
+            
+            # Use real values if available, otherwise use defaults
+            default_criteria_id = criteria_id if criteria_id and criteria_id != '00000000-0000-0000-0000-000000000000' else '00000000-0000-0000-0000-000000000000'
+            default_created_by = user_id if user_id and user_id != '00000000-0000-0000-0000-000000000000' else '00000000-0000-0000-0000-000000000000'
+            
+            cur.execute(assessment_insert_query, (
+                jd_id,  # resolved_jd_id
+                default_criteria_id,  # criteria_id
+                candidate_name,  # candidate_name
+                resume_url or resume_filename,  # resume_url
+                json.dumps(structured_analysis),  # scoring
+                'completed',  # status
+                default_created_by,  # created_by
+                token_count,  # token_count
+                content_hash  # content_hash
+            ))
+            
+            assessment_id = cur.fetchone()[0]
             conn.commit()
             cur.close()
             conn.close()
             
-            logger.info(f"Successfully saved resume analysis for {resume_filename} with ID: {analysis_id}")
-            return {'analysis_id': analysis_id, 'resume_filename': resume_filename}
+            logger.info(f"Successfully saved resume analysis for {resume_filename}")
+            logger.info(f"Resume ID: {resume_id}, Assessment ID: {assessment_id}")
+            return {'analysis_id': assessment_id, 'resume_id': resume_id, 'resume_filename': resume_filename}
             
         except psycopg2.Error as e:
             if conn:
@@ -914,6 +947,43 @@ Important: Return only the JSON object, nothing else. Ensure proper formatting a
         
         # Join with single line breaks (not double)
         return "\n".join(formatted_parts)
+
+    def _extract_candidate_name_from_filename(self, filename):
+        """Extract candidate name from filename intelligently"""
+        import re
+        
+        # Remove file extension
+        name_without_ext = filename.rsplit('.', 1)[0] if '.' in filename else filename
+        
+        # Handle timestamped filenames: YYYYMMDD_HHMMSS_original_filename
+        if '_' in name_without_ext and len(name_without_ext.split('_')) >= 3:
+            parts = name_without_ext.split('_', 2)
+            if len(parts) >= 3:
+                original_filename = parts[2]
+                
+                # Extract name from original filename
+                # Look for pattern: Number_FirstName_LastName_JobTitle
+                name_parts = original_filename.split('_')
+                
+                # If we have at least 3 parts, skip the first (number) and take next two as name
+                if len(name_parts) >= 3:
+                    # Skip the first part (number) and take next two as first and last name
+                    candidate_name = f"{name_parts[1]} {name_parts[2]}"
+                    return candidate_name.title()
+                elif len(name_parts) >= 2:
+                    # Take first two parts as first and last name
+                    candidate_name = f"{name_parts[0]} {name_parts[1]}"
+                    return candidate_name.title()
+                
+                # Fallback: clean up the entire original filename
+                name = re.sub(r'[_-]', ' ', original_filename)
+                name = re.sub(r'\s+', ' ', name).strip()
+                return name.title()
+        
+        # For regular filenames, just clean up the name
+        candidate_name = re.sub(r'[_-]', ' ', name_without_ext)
+        candidate_name = re.sub(r'\s+', ' ', candidate_name).strip()
+        return candidate_name.title()
 
     def _structure_analysis_data(self, analysis_result):
         """Structure the analysis data in the required JSON format"""
@@ -1356,15 +1426,15 @@ Ensure all scores are between 1-10 and the final score is calculated as a weight
                 # Get the sum of all previous token counts for this resume content (across all JDs and criteria)
                 cur.execute("""
                     SELECT COALESCE(SUM(token_count), 0) as total_previous_tokens, COUNT(*) as previous_uploads
-                    FROM resume_scores 
+                    FROM assessment_reports 
                     WHERE content_hash = %s
                 """, (content_hash,))
             else:
                 # Fallback to filename-based tracking
                 cur.execute("""
                     SELECT COALESCE(SUM(token_count), 0) as total_previous_tokens, COUNT(*) as previous_uploads
-                    FROM resume_scores 
-                    WHERE resume_filename = %s AND jd_id = %s AND criteria_id = %s
+                    FROM assessment_reports 
+                    WHERE resume_url = %s AND resolved_jd_id = %s AND criteria_id = %s
                 """, (resume_filename, jd_id, criteria_id))
             
             previous_stats = cur.fetchone()
@@ -1391,66 +1461,42 @@ Ensure all scores are between 1-10 and the final score is calculated as a weight
             logger.info(f"Cumulative tokens: {cumulative_token_count}, Upload count: {upload_count}")
             logger.info(f"Content hash: {content_hash}")
             
-            # Check if content_hash column exists, if not use the old schema
-            try:
-                insert_query = """
-                    INSERT INTO resume_scores (
-                        analysis_id, criteria_id, jd_id, resume_filename, content_hash,
-                        parameter_scores, final_score, recommendation, consideration,
-                        detailed_assessment, token_count, cumulative_token_count, upload_count
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    RETURNING score_id
-                """
-                
-                cur.execute(insert_query, (
-                    analysis_id,
-                    criteria_id,
-                    jd_id,
-                    resume_filename,
-                    content_hash,
-                    json.dumps(parameter_scores),  # Use simple JSON string
-                    final_score,
-                    recommendation,
-                    consideration,
-                    detailed_assessment,
-                    token_count,
-                    cumulative_token_count,
-                    upload_count
-                ))
-            except psycopg2.ProgrammingError:
-                # Fallback to old schema without content_hash column
-                logger.warning("content_hash column not found, using old schema")
-                insert_query = """
-                    INSERT INTO resume_scores (
-                        analysis_id, criteria_id, jd_id, resume_filename,
-                        parameter_scores, final_score, recommendation, consideration,
-                        detailed_assessment, token_count, cumulative_token_count, upload_count
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    RETURNING score_id
-                """
-                
-                cur.execute(insert_query, (
-                    analysis_id,
-                    criteria_id,
-                    jd_id,
-                    resume_filename,
-                    json.dumps(parameter_scores),  # Use simple JSON string
-                    final_score,
-                    recommendation,
-                    consideration,
-                    detailed_assessment,
-                    token_count,
-                    cumulative_token_count,
-                    upload_count
-                ))
+            # Update assessment_reports with scoring data
+            update_query = """
+                UPDATE assessment_reports 
+                SET 
+                    overall_score = %s,
+                    recommendation = %s,
+                    detailed_assessment = %s,
+                    token_count = %s,
+                    cumulative_token_count = %s,
+                    upload_count = %s,
+                    content_hash = %s,
+                    scoring = %s
+                WHERE id = %s
+                RETURNING id
+            """
             
-            result = cur.fetchone()
+            # Execute the update
+            cur.execute(update_query, (
+                final_score,
+                recommendation,
+                detailed_assessment,
+                token_count or 0,
+                cumulative_token_count,
+                upload_count,
+                content_hash,
+                json.dumps(scoring_result),
+                analysis_id
+            ))
+            
+            updated_id = cur.fetchone()['id']
             conn.commit()
             cur.close()
             conn.close()
             
-            logger.info(f"Successfully saved scoring result with ID: {result['score_id']}")
-            return result['score_id']
+            logger.info(f"Successfully updated assessment_reports with scoring data. ID: {updated_id}")
+            return updated_id
             
         except Exception as e:
             if conn:
@@ -2108,9 +2154,9 @@ class ScoringManager:
             
             # First, let's see all records for this resume
             cur.execute("""
-                SELECT score_id, jd_id, criteria_id, cumulative_token_count, upload_count, created_at
-                FROM resume_scores 
-                WHERE resume_filename = %s
+                SELECT id as score_id, resolved_jd_id as jd_id, criteria_id, cumulative_token_count, upload_count, created_at
+                FROM assessment_reports 
+                WHERE candidate_name = %s
                 ORDER BY created_at DESC
             """, (resume_filename,))
             
@@ -2120,8 +2166,8 @@ class ScoringManager:
             # Get the sum of all previous token counts for this resume, JD, and criteria
             cur.execute("""
                 SELECT COALESCE(SUM(token_count), 0) as total_previous_tokens, COUNT(*) as previous_uploads
-                FROM resume_scores 
-                WHERE resume_filename = %s AND jd_id = %s AND criteria_id = %s
+                FROM assessment_reports 
+                WHERE candidate_name = %s AND resolved_jd_id = %s AND criteria_id = %s
             """, (resume_filename, jd_id, criteria_id))
             
             previous_stats = cur.fetchone()
@@ -2147,29 +2193,14 @@ class ScoringManager:
             logger.info(f"Token count: {token_count}")
             logger.info(f"Cumulative tokens: {cumulative_token_count}, Upload count: {upload_count}")
             
-            insert_query = """
-                INSERT INTO resume_scores (
-                    analysis_id, criteria_id, jd_id, resume_filename,
-                    parameter_scores, final_score, recommendation, consideration,
-                    detailed_assessment, token_count, cumulative_token_count, upload_count
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING score_id
-            """
+            # Note: This method is deprecated - scoring is now handled by save_scoring_result in ResumeAnalyzer
+            # This method is kept for backward compatibility but should not be used
+            logger.warning("ScoringManager.save_scoring_result is deprecated. Use ResumeAnalyzer.save_scoring_result instead.")
             
-            cur.execute(insert_query, (
-                analysis_id,
-                criteria_id,
-                jd_id,
-                resume_filename,
-                json.dumps(parameter_scores),  # Use simple JSON string
-                final_score,
-                recommendation,
-                consideration,
-                detailed_assessment,
-                token_count,
-                cumulative_token_count,
-                upload_count
-            ))
+            # Return a mock ID since this method is deprecated
+            mock_id = f"deprecated_{analysis_id}_{criteria_id}"
+            logger.info(f"Returning mock ID for deprecated method: {mock_id}")
+            return mock_id
             
             result = cur.fetchone()
             conn.commit()
@@ -2201,27 +2232,27 @@ class ScoringManager:
             params = []
             
             if jd_id:
-                where_conditions.append("rs.jd_id = %s")
+                where_conditions.append("ar.resolved_jd_id = %s")
                 params.append(jd_id)
             
             if criteria_id:
-                where_conditions.append("rs.criteria_id = %s")
+                where_conditions.append("ar.criteria_id = %s")
                 params.append(criteria_id)
             
             where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
             
             query = f"""
                 SELECT 
-                    rs.score_id, rs.analysis_id, rs.criteria_id, rs.jd_id,
-                    rs.resume_filename, rs.parameter_scores, rs.final_score,
-                    rs.recommendation, rs.consideration, rs.created_at,
-                    rs.token_count, rs.cumulative_token_count, rs.upload_count,
+                    ar.id as score_id, ar.id as analysis_id, ar.criteria_id, ar.resolved_jd_id as jd_id,
+                    ar.candidate_name as resume_filename, ar.scoring, ar.overall_score as final_score,
+                    ar.recommendation, ar.scoring->>'consideration' as consideration, ar.created_at,
+                    ar.token_count, ar.cumulative_token_count, ar.upload_count,
                     c.criteria_name, jd.title as jd_title
-                FROM resume_scores rs
-                LEFT JOIN criteria c ON rs.criteria_id = c.criteria_id
-                LEFT JOIN job_descriptions jd ON rs.jd_id = jd.jd_id
+                FROM assessment_reports ar
+                LEFT JOIN criteria c ON ar.criteria_id = c.criteria_id
+                LEFT JOIN job_descriptions jd ON ar.resolved_jd_id = jd.jd_id
                 WHERE {where_clause}
-                ORDER BY rs.created_at DESC
+                ORDER BY ar.created_at DESC
                 LIMIT %s OFFSET %s
             """
             
@@ -2257,7 +2288,7 @@ class ScoringManager:
             params = []
             
             if jd_id:
-                where_conditions.append("jd_id = %s")
+                where_conditions.append("resolved_jd_id = %s")
                 params.append(jd_id)
             
             if criteria_id:
@@ -2269,13 +2300,13 @@ class ScoringManager:
             query = f"""
                 SELECT 
                     COUNT(*) as total_scores,
-                    AVG(final_score) as avg_score,
-                    MIN(final_score) as min_score,
-                    MAX(final_score) as max_score,
+                    AVG(overall_score) as avg_score,
+                    MIN(overall_score) as min_score,
+                    MAX(overall_score) as max_score,
                     COUNT(CASE WHEN recommendation = 'To be interviewed' THEN 1 END) as to_interview,
                     COUNT(CASE WHEN recommendation = 'Candidature rejected' THEN 1 END) as rejected,
                     COUNT(CASE WHEN recommendation = 'Review further' THEN 1 END) as review_further
-                FROM resume_scores 
+                FROM assessment_reports 
                 WHERE {where_clause}
             """
             
@@ -2360,7 +2391,7 @@ def analyze_resumes():
                         if len(parts) >= 3:
                             original_filename = parts[2]  # Get the original filename part
                     
-                    analysis_record = analyzer.save_resume_analysis(jd_id, filename, analysis_result, url)
+                    analysis_record = analyzer.save_resume_analysis(jd_id, filename, analysis_result, url, criteria_id=criteria_id)
                     
                     # Perform scoring if criteria is provided with retry logic
                     scoring_result = None
@@ -2441,8 +2472,10 @@ def analyze_resumes():
                     
             except Exception as e:
                 logger.error(f"❌ Error processing resume URL {url}: {e}")
+                filename = url.split('/')[-1] if '/' in url else 'resume.pdf'
                 failed_resumes.append({
                     'url': url,
+                    'filename': filename,
                     'error': str(e)
                 })
         
@@ -2471,7 +2504,7 @@ def analyze_resumes():
                         if len(parts) >= 3:
                             original_filename = parts[2]  # Get the original filename part
                     
-                    analysis_record = analyzer.save_resume_analysis(jd_id, filename, analysis_result)
+                    analysis_record = analyzer.save_resume_analysis(jd_id, filename, analysis_result, criteria_id=criteria_id)
                     
                     # Perform scoring if criteria is provided with retry logic
                     scoring_result = None
@@ -2552,8 +2585,10 @@ def analyze_resumes():
                     
             except Exception as e:
                 logger.error(f"❌ Error processing resume file {file_path}: {e}")
+                filename = os.path.basename(file_path) if file_path else 'unknown.pdf'
                 failed_resumes.append({
                     'file_path': file_path,
+                    'filename': filename,
                     'error': str(e)
                 })
         
@@ -2582,7 +2617,7 @@ def analyze_resumes():
             'message': str(e)
         }), 500
 
-@app.route('/scoring_details/<int:score_id>', methods=['GET'])
+@app.route('/scoring_details/<score_id>', methods=['GET'])
 def get_scoring_details(score_id):
     """Get detailed scoring information for a specific score"""
     try:
@@ -2593,12 +2628,12 @@ def get_scoring_details(score_id):
         
         cur = conn.cursor(cursor_factory=RealDictCursor)
         
-        # Get scoring details
+        # Get scoring details from assessment_reports table
         query = """
-            SELECT rs.*, c.criteria_name
-            FROM resume_scores rs
-            LEFT JOIN criteria c ON rs.criteria_id = c.criteria_id
-            WHERE rs.score_id = %s
+            SELECT ar.*, c.criteria_name
+            FROM assessment_reports ar
+            LEFT JOIN criteria c ON ar.criteria_id = c.criteria_id
+            WHERE ar.id = %s
         """
         cur.execute(query, (score_id,))
         result = cur.fetchone()
@@ -2609,10 +2644,12 @@ def get_scoring_details(score_id):
         if not result:
             return jsonify({'success': False, 'error': 'Scoring details not found'}), 404
         
-        # Parse parameter scores
-        parameter_scores = result['parameter_scores']
-        if isinstance(parameter_scores, str):
-            parameter_scores = json.loads(parameter_scores)
+        # Parse parameter scores from scoring JSONB
+        scoring_data = result['scoring']
+        if isinstance(scoring_data, str):
+            scoring_data = json.loads(scoring_data)
+        
+        parameter_scores = scoring_data.get('parameter_scores', {})
         
         # Format details for frontend
         details = []
@@ -2628,9 +2665,9 @@ def get_scoring_details(score_id):
         return jsonify({
             'success': True,
             'score': {
-                'final_score': result['final_score'],
+                'final_score': result['overall_score'],
                 'recommendation': result['recommendation'],
-                'consideration': result['consideration'],
+                'consideration': scoring_data.get('consideration', ''),
                 'detailed_assessment': result.get('detailed_assessment', '')
             },
             'details': details
@@ -3170,7 +3207,8 @@ def get_resume_analysis_results():
         limit = int(request.args.get('limit', 50))
         offset = int(request.args.get('offset', 0))
         
-        conn = get_db_connection()
+        analyzer = ResumeAnalyzer()
+        conn = analyzer.get_db_connection()
         if not conn:
             return jsonify({
                 'status': 'error',
@@ -3185,20 +3223,21 @@ def get_resume_analysis_results():
             params = []
             
             if jd_id:
-                where_conditions.append("ra.jd_id = %s")
+                where_conditions.append("ar.resolved_jd_id = %s")
                 params.append(jd_id)
             
             where_clause = " AND ".join(where_conditions) if where_conditions else "1=1"
             
             query = f"""
                 SELECT 
-                    ra.analysis_id, ra.jd_id, ra.resume_filename, ra.resume_url,
-                    ra.analysis_data, ra.status, ra.created_at,
-                    jd.title as jd_title
-                FROM resume_analyses ra
-                LEFT JOIN job_descriptions jd ON ra.jd_id = jd.jd_id
+                    ar.id as analysis_id, ar.resolved_jd_id as jd_id, ar.candidate_name as resume_filename, ar.resume_url,
+                    ar.scoring, ar.status, ar.created_at,
+                    jd.title as jd_title,
+                    ar.scoring as analysis_data
+                FROM assessment_reports ar
+                LEFT JOIN job_descriptions jd ON ar.resolved_jd_id = jd.jd_id
                 WHERE {where_clause}
-                ORDER BY ra.created_at DESC
+                ORDER BY ar.created_at DESC
                 LIMIT %s OFFSET %s
             """
             
@@ -3211,23 +3250,36 @@ def get_resume_analysis_results():
             for row in results:
                 result = dict(row)
                 
-                # Parse the analysis_data JSON
+                # Parse the analysis_data (already a dict from psycopg2)
                 if result['analysis_data']:
                     try:
-                        analysis_data = json.loads(result['analysis_data'])
-                        result['personal_details'] = analysis_data.get('personal_details', {})
-                        result['skills'] = analysis_data.get('skills', [])
-                        result['education'] = analysis_data.get('education', [])
-                        result['experience'] = analysis_data.get('experience', [])
-                        result['summary'] = analysis_data.get('summary', '')
-                    except (json.JSONDecodeError, TypeError):
+                        analysis_data = result['analysis_data']
+                        
+                        # Handle both string and dict formats
+                        if isinstance(analysis_data, str):
+                            analysis_data = json.loads(analysis_data)
+                        
+                        # Extract scoring information
+                        result['final_score'] = analysis_data.get('final_score', 0)
+                        result['recommendation'] = analysis_data.get('recommendation', 'Review further')
+                        result['consideration'] = analysis_data.get('consideration', '')
+                        result['parameter_scores'] = analysis_data.get('parameter_scores', {})
+                        result['detailed_assessment'] = analysis_data.get('detailed_assessment', '')
+                    except (json.JSONDecodeError, TypeError) as e:
                         # If parsing fails, keep the raw data
                         result['analysis_data_raw'] = result['analysis_data']
-                        result['personal_details'] = {}
-                        result['skills'] = []
-                        result['education'] = []
-                        result['experience'] = []
-                        result['summary'] = ''
+                        result['final_score'] = 0
+                        result['recommendation'] = 'Review further'
+                        result['consideration'] = ''
+                        result['parameter_scores'] = {}
+                        result['detailed_assessment'] = ''
+                        logger.error(f"Error parsing analysis_data: {e}")
+                else:
+                    result['final_score'] = 0
+                    result['recommendation'] = 'Review further'
+                    result['consideration'] = ''
+                    result['parameter_scores'] = {}
+                    result['detailed_assessment'] = ''
                 
                 processed_results.append(result)
             
